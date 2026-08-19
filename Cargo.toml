@@ -1,0 +1,21 @@
+[workspace]
+members = ["crates/sarnaut-assets"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/SarnautCore/tools"
+rust-version = "1.85"
+
+[workspace.dependencies]
+anyhow = "1.0"
+blake3 = "1.8"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+indicatif = "0.18"
+rayon = "1.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.23"
+walkdir = "2.5"
