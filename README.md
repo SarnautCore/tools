@@ -1,6 +1,6 @@
 # SarnautCore tools
 
-This repository contains command-line tools used to rebuild SarnautCore assets. Its first crate, `sarnaut-assets`, ingests source trees into a BLAKE3 content-addressed store.
+This repository contains command-line tools used to rebuild SarnautCore assets and game data. `sarnaut-assets` ingests source trees into a BLAKE3 content-addressed store. `sarnaut-extract` converts supported XDB resources to schema-validated YAML.
 
 ## Build
 
@@ -10,7 +10,8 @@ Rust 1.85 or newer is required.
 cargo build --release
 ```
 
-The executable is written to `target\release\sarnaut-assets.exe`.
+The executables are written to `target\release\sarnaut-assets.exe` and
+`target\release\sarnaut-extract.exe`.
 
 ## Commands
 
@@ -69,6 +70,27 @@ Manifests use JSON Lines. Each line has a `record` discriminator. Paths are rela
 
 `stats` defines deduplication ratio as total logical bytes divided by bytes in unique referenced hashes. Deduplication savings are total logical bytes minus unique referenced bytes.
 
+## XDB extraction
+
+`sarnaut-extract` reads XDB files without changing the source tree. Output ordering,
+IDs, and YAML field order are deterministic. `--validate` checks every document
+against `data-schemas/schemas` before writing it.
+
+```powershell
+sarnaut-extract items `
+  --src E:\allods\servers-clean\1.1.02.0\game\data `
+  --out E:\SarnautCore\data\classic `
+  --validate
+
+sarnaut-extract zone `
+  --name InstLeague1 `
+  --src E:\allods\servers-clean\1.1.02.0\game\data `
+  --out E:\SarnautCore\data\classic `
+  --validate
+```
+
+Add `--dry-run` to parse, map, hash, and validate without writing YAML.
+
 ## Future converted outputs
 
 Converters will write their results into the same blob namespace. Their cache identity is the tuple below:
@@ -93,7 +115,7 @@ Converters will write their results into the same blob namespace. Their cache id
 }
 ```
 
-This keeps provenance separate from blob storage. Changing converter code or settings produces a different key, while byte-identical outputs still deduplicate through their output BLAKE3 hash. This repository currently implements source ingestion only.
+This keeps provenance separate from blob storage. Changing converter code or settings produces a different key, while byte-identical outputs still deduplicate through their output BLAKE3 hash.
 
 ## Clean-room boundary
 

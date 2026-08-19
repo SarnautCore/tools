@@ -1,0 +1,22 @@
+[package]
+name = "sarnaut-extract"
+version = "0.1.0"
+description = "Deterministic XDB to YAML extractor for SarnautCore game data"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+clap.workspace = true
+jsonschema.workspace = true
+roxmltree.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
