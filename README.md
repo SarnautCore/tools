@@ -11,8 +11,9 @@ the `PROTOC` environment variable pointing at it.
 cargo build --release
 ```
 
-The executables are written to `target\release\sarnaut-assets.exe` and
-`target\release\sarnaut-extract.exe`.
+The executables are written to `target\release`, including
+`sarnaut-assets.exe`, `sarnaut-extract.exe`, `sarnaut-pack.exe`, and
+`sarnaut-quest-census.exe`.
 
 ## Commands
 
@@ -129,6 +130,42 @@ Three things about these are worth knowing before reading their output:
   thousands. Each locale entry records the root it came from, and a key both roots
   carry with different text is reported as a mismatch instead of being resolved
   silently.
+
+## Quest census
+
+`sarnaut-quest-census` is the weekly M3 delivery metric. It applies the same
+objective rule as `server/internal/quests/catalog.go`: count-item and count-kill
+are servable, while any other objective kind makes the quest unservable. A
+positive item or kill limit with no target is reported separately as an invalid
+objective shape.
+
+Run the day-zero InstLeague1 measurement from this repository:
+
+```powershell
+cargo run --release -p sarnaut-quest-census -- `
+  --quests ..\data\classic\zones\inst-league1\quests `
+  --baseline census\inst-league1-baseline.json `
+  --json quest-census.json
+```
+
+The command prints one table row per quest and writes the same rows, summary,
+reason counts, and objective-kind counts as JSON. With `--baseline`, it exits
+non-zero if either the servable count or the total quest count falls below the
+committed measurement.
+
+The JSON always contains this ADR 0036 extension point:
+
+```json
+"script_nodes": {
+  "implemented": null,
+  "inert_and_counted": null,
+  "refused": null
+}
+```
+
+Pass `--script-node-counts counts.json` to fill those three fields without
+changing the report shape. The input file is the object shown above with integer
+values in place of `null`.
 
 ## Future converted outputs
 

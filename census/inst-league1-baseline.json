@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "measurement_date": "2026-08-20",
+  "source": "data/classic/zones/inst-league1/quests/*.yaml",
+  "server_rule": {
+    "path": "server/internal/quests/catalog.go",
+    "commit": "4fae289eba78da848948db52b10ef373b241a6fa",
+    "function": "checkObjectives"
+  },
+  "minimum_servable": 12,
+  "measured": {
+    "total_quests": 21,
+    "servable": 12,
+    "unservable": 9,
+    "objectives_extracted": 12,
+    "objective_kinds": {
+      "quest-count-item": 1,
+      "quest-count-kill": 1,
+      "quest-count-special": 10
+    },
+    "reasons": {
+      "servable": 12,
+      "unsupported objective kind": 9
+    }
+  }
+}

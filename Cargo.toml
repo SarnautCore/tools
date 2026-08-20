@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/sarnaut-assets", "crates/sarnaut-extract", "crates/sarnaut-pack"]
+members = [
+    "crates/sarnaut-assets",
+    "crates/sarnaut-extract",
+    "crates/sarnaut-pack",
+    "crates/sarnaut-quest-census",
+]
 resolver = "3"
 
 [workspace.package]
