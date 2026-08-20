@@ -1,0 +1,5 @@
+schema_version: 1
+id: quest.fixture.unservable-09
+objectives:
+- kind: quest-count-special
+  limit: 1

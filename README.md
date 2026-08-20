@@ -167,6 +167,13 @@ Pass `--script-node-counts counts.json` to fill those three fields without
 changing the report shape. The input file is the object shown above with integer
 values in place of `null`.
 
+The public tools CI cannot read the private extracted data repository. It runs
+an invented 21-document fixture that matches the aggregate baseline, labels the
+number as fixture data in the job summary, and uploads its JSON report. The
+private data CI runs the command against
+`classic/zones/inst-league1/quests`, publishes the real table in its job
+summary, uploads the real JSON report, and fails below the baseline.
+
 ## Future converted outputs
 
 Converters will write their results into the same blob namespace. Their cache identity is the tuple below:

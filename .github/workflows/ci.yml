@@ -124,3 +124,43 @@ jobs:
             echo "a compiled table carries a source resource path" >&2
             exit 1
           fi
+
+  quest-census:
+    name: Quest census baseline (authored fixture)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Run the day-zero census gate
+        run: |
+          cargo run --locked --quiet --release -p sarnaut-quest-census -- \
+            --quests crates/sarnaut-quest-census/tests/fixtures/day-zero/quests \
+            --baseline census/inst-league1-baseline.json \
+            --json "$RUNNER_TEMP/quest-census.json"
+
+      - name: Publish the fixture census in the job summary
+        env:
+          REPORT: ${{ runner.temp }}/quest-census.json
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          with open(os.environ["REPORT"], encoding="utf-8") as source:
+              report = json.load(source)
+          summary = report["summary"]
+          print("## Quest delivery census")
+          print()
+          print(
+              f"**{summary['servable']}/{summary['total_quests']} servable** "
+              f"({summary['unservable']} unservable)"
+          )
+          print()
+          print("Public CI uses the authored aggregate fixture. The private data workflow publishes the real extracted-data report.")
+          PY
+
+      - name: Upload the fixture census JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: quest-census-fixture-${{ github.sha }}
+          path: ${{ runner.temp }}/quest-census.json
+          if-no-files-found: error

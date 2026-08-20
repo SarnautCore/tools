@@ -82,6 +82,52 @@ fn unsupported_kinds_are_distinct_from_other_unservable_causes() {
     assert_eq!(report["summary"]["reasons"]["invalid objective shape"], 1);
 }
 
+#[test]
+fn script_tier_counts_fill_the_reserved_report_fields() {
+    let fixture = TempDir::new().expect("create quest fixture");
+    write_quest(
+        &fixture.path().join("servable.yaml"),
+        "quest.fixture.servable",
+        "",
+    );
+    let counts = fixture.path().join("script-node-counts.json");
+    fs::write(
+        &counts,
+        r#"{"implemented":17,"inert_and_counted":45,"refused":3}"#,
+    )
+    .expect("write script counts");
+    let report = fixture.path().join("census.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_sarnaut-quest-census"))
+        .args([
+            "--quests",
+            fixture.path().to_str().expect("UTF-8 fixture path"),
+        ])
+        .args([
+            "--script-node-counts",
+            counts.to_str().expect("UTF-8 counts path"),
+        ])
+        .args(["--json", report.to_str().expect("UTF-8 report path")])
+        .output()
+        .expect("run sarnaut-quest-census");
+    assert!(
+        output.status.success(),
+        "census failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let report: Value =
+        serde_json::from_str(&fs::read_to_string(report).expect("read generated census report"))
+            .expect("parse generated census report");
+    assert_eq!(report["script_nodes"]["implemented"], 17);
+    assert_eq!(report["script_nodes"]["inert_and_counted"], 45);
+    assert_eq!(report["script_nodes"]["refused"], 3);
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("script nodes: implemented=17, inert-and-counted=45, refused=3")
+    );
+}
+
 fn run_census(quests: &Path, report: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_sarnaut-quest-census"))
         .args(["--quests", quests.to_str().expect("UTF-8 fixture path")])
