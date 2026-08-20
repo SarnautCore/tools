@@ -28,6 +28,8 @@ pub struct SourceTree {
     pub abilities: Vec<AbilityDocument>,
     pub factions: Vec<FactionDocument>,
     pub chargen_options: Vec<ChargenDocument>,
+    pub items: Vec<ItemDocument>,
+    pub loot_tables: Vec<LootTableDocument>,
 }
 
 /// The localization keys a document carries. Only `name` reaches most pack
@@ -132,6 +134,69 @@ pub struct FactionDocument {
 pub struct FactionRelationDocument {
     pub faction: String,
     pub stance: String,
+}
+
+/// One item definition. Only the fields the shard needs to hold an instance in
+/// a bag are read; the combat, stat and visual blocks stay in the authored
+/// document until something consumes them.
+#[derive(Debug, Deserialize)]
+pub struct ItemDocument {
+    pub id: String,
+    #[serde(default)]
+    pub loc_ref: LocRef,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub level: Option<u32>,
+    #[serde(default)]
+    pub required_level: Option<u32>,
+    /// Maximum units in one stack. `mechanics/loot.md` rule 5.7.1 makes this
+    /// per-item content rather than a constant, so an absent value stays absent
+    /// here and the reader decides what it means.
+    #[serde(default)]
+    pub stack_limit: Option<i32>,
+    #[serde(default)]
+    pub vendor_price: Option<VendorPriceDocument>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+pub struct VendorPriceDocument {
+    #[serde(default)]
+    pub sell: i64,
+    #[serde(default)]
+    pub buy: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LootTableDocument {
+    pub id: String,
+    pub root: LootNodeDocument,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// One node of a loot tree, read as the union of every node shape rather than
+/// as a tagged enum.
+///
+/// Discriminating on `node` here would make a misspelled discriminator a serde
+/// error naming the whole tree; reading the union and dispatching in the
+/// compiler makes it an error naming the one node, which is the difference
+/// between a usable message and a wall of YAML.
+#[derive(Debug, Deserialize)]
+pub struct LootNodeDocument {
+    pub node: String,
+    #[serde(default)]
+    pub entries: Vec<LootNodeDocument>,
+    #[serde(default)]
+    pub chances: Vec<f64>,
+    #[serde(default)]
+    pub item: Option<ObjectRef>,
+    #[serde(default)]
+    pub min_number: Option<i32>,
+    #[serde(default)]
+    pub max_number: Option<i32>,
 }
 
 /// The respawn window an authored placement carries, in milliseconds.
@@ -306,6 +371,10 @@ pub fn load(
             // (ADR 0032), so they sit beside the zones directory. A tree that
             // has none still builds: the pack simply carries no chargen table.
             files.extend(optional_yaml_files(&root.join(ruleset).join("chargen"))?);
+            // Items and loot tables are global for the same reason: an item is
+            // not owned by the zone whose mob happens to drop it.
+            files.extend(optional_yaml_files(&root.join(ruleset).join("items"))?);
+            files.extend(optional_yaml_files(&root.join(ruleset).join("loot"))?);
             files
         }
         Layout::Flat => yaml_files(root)?,
@@ -364,9 +433,14 @@ fn read_document(tree: &mut SourceTree, document: Value, path: &Path) -> Result<
         "chargen" => tree
             .chargen_options
             .push(serde_yaml::from_value(document).with_context(|| context("chargen option"))?),
-        // Items, quests, routes and locales carry no runtime rows here. A pack
-        // that needs them gets a table of its own rather than a guess in this
-        // match.
+        "item" => tree
+            .items
+            .push(serde_yaml::from_value(document).with_context(|| context("item"))?),
+        "loot" => tree
+            .loot_tables
+            .push(serde_yaml::from_value(document).with_context(|| context("loot table"))?),
+        // Quests, routes and locales carry no runtime rows here. A pack that
+        // needs them gets a table of its own rather than a guess in this match.
         _ => {}
     }
     Ok(())

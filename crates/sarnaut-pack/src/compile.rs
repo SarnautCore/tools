@@ -19,6 +19,14 @@ pub const TABLE_ABILITIES: &str = "abilities";
 pub const TABLE_FACTIONS: &str = "factions";
 pub const TABLE_MOBS: &str = "mobs";
 pub const TABLE_CHARGEN: &str = "chargen";
+pub const TABLE_ITEMS: &str = "items";
+pub const TABLE_LOOT_TABLES: &str = "loot-tables";
+
+/// Maximum container depth of a loot tree, `mechanics/loot.md` section 3's
+/// `MAX_TREE_DEPTH`. The deepest tree in reference data is 2; this is headroom,
+/// and rejecting past it at compile time means the shard never has to defend a
+/// recursive walk against authored content.
+const MAX_LOOT_TREE_DEPTH: u32 = 8;
 
 /// A mob record that names no MobKind, or one whose MobKind carries no
 /// `hp_mod`, is written with this multiplier. It matches `mechanics/combat.md`
@@ -88,6 +96,9 @@ pub fn build(options: &BuildOptions) -> Result<BuildReport> {
     let mobs = mob_rows(&tree, &known_abilities, &known_factions, options.keep_extra)?;
 
     let chargen = chargen_rows(&tree, options.keep_extra)?;
+    let items = item_rows(&tree, options.keep_extra)?;
+    let known_items: BTreeSet<&str> = items.iter().map(|row| row.key.as_str()).collect();
+    let loot_tables = loot_table_rows(&tree, &known_items, options.keep_extra)?;
 
     // Every gameplay table below is written even when it has no rows, so a
     // reader can insist on the full set rather than treating "absent" and
@@ -132,13 +143,30 @@ pub fn build(options: &BuildOptions) -> Result<BuildReport> {
         ),
     ];
     // A source tree with no chargen documents produces no chargen table, so a
-    // pack built before ADR 0032's document type existed keeps its digest.
+    // pack built before ADR 0032's document type existed keeps its digest. The
+    // item and loot tables follow the same rule for the same reason.
     if !chargen.is_empty() {
         encoded.push((
             TABLE_CHARGEN.to_string(),
             proto::RowType::ChargenOption,
             table::encode(proto::RowType::ChargenOption as i32, &chargen)?,
             chargen.len() as u32,
+        ));
+    }
+    if !items.is_empty() {
+        encoded.push((
+            TABLE_ITEMS.to_string(),
+            proto::RowType::Item,
+            table::encode(proto::RowType::Item as i32, &items)?,
+            items.len() as u32,
+        ));
+    }
+    if !loot_tables.is_empty() {
+        encoded.push((
+            TABLE_LOOT_TABLES.to_string(),
+            proto::RowType::LootTable,
+            table::encode(proto::RowType::LootTable as i32, &loot_tables)?,
+            loot_tables.len() as u32,
         ));
     }
 
@@ -544,6 +572,170 @@ fn chargen_rows(tree: &SourceTree, keep_extra: bool) -> Result<Vec<Row>> {
         }
     }
     Ok(encode_rows(seen))
+}
+
+/// Compiles the item definitions.
+///
+/// `stack_limit` is copied through rather than defaulted. `mechanics/loot.md`
+/// rule 5.7.1 makes the limit per-item content, and a compiler that invented a
+/// default here would be deciding a gameplay rule in Rust; the reader treats an
+/// absent limit as unstackable, and does so in one documented place.
+fn item_rows(tree: &SourceTree, keep_extra: bool) -> Result<Vec<Row>> {
+    let mut seen: BTreeMap<String, proto::Item> = BTreeMap::new();
+    for document in &tree.items {
+        let price = document.vendor_price.unwrap_or_default();
+        let message = proto::Item {
+            id: document.id.clone(),
+            name_key: document.loc_ref.name.clone().unwrap_or_default(),
+            category: document.category.clone().unwrap_or_default(),
+            level: document.level.unwrap_or_default(),
+            required_level: document.required_level.unwrap_or_default(),
+            stack_limit: document.stack_limit.unwrap_or_default(),
+            vendor_sell: price.sell,
+            vendor_buy: price.buy,
+            extra: extra_map(&document.extra, keep_extra)?,
+        };
+        if document.stack_limit.is_some_and(|limit| limit < 0) {
+            bail!(
+                "item {} declares a negative stack_limit {}",
+                document.id,
+                document.stack_limit.unwrap_or_default()
+            );
+        }
+        if seen.insert(document.id.clone(), message).is_some() {
+            bail!("item id {} is declared twice", document.id);
+        }
+    }
+    Ok(encode_rows(seen))
+}
+
+/// Compiles the loot trees, enforcing every structural rule
+/// `mechanics/loot.md` section 4 states as "enforced at load".
+///
+/// Doing it here rather than only in the shard is the point of a compiled pack:
+/// a tree whose `chances` array is one short is a content mistake, and it
+/// should stop a build rather than surface as a mob that never drops its rare.
+fn loot_table_rows(
+    tree: &SourceTree,
+    known_items: &BTreeSet<&str>,
+    keep_extra: bool,
+) -> Result<Vec<Row>> {
+    let mut seen: BTreeMap<String, proto::LootTable> = BTreeMap::new();
+    for document in &tree.loot_tables {
+        let root = loot_node(&document.root, &document.id, "/root", known_items, 1)?;
+        let message = proto::LootTable {
+            id: document.id.clone(),
+            root: Some(root),
+            extra: extra_map(&document.extra, keep_extra)?,
+        };
+        if seen.insert(document.id.clone(), message).is_some() {
+            bail!("loot table id {} is declared twice", document.id);
+        }
+    }
+    Ok(encode_rows(seen))
+}
+
+/// Converts one authored node, recursively. `depth` is the container level this
+/// node would occupy, counting containers only, as `MAX_TREE_DEPTH` does.
+fn loot_node(
+    document: &source::LootNodeDocument,
+    table_id: &str,
+    pointer: &str,
+    known_items: &BTreeSet<&str>,
+    depth: u32,
+) -> Result<proto::LootNode> {
+    let counts = |kind: proto::LootNodeKind| -> Result<(i32, i32)> {
+        let low = document.min_number.unwrap_or_default();
+        let high = document.max_number.unwrap_or_default();
+        if high < low {
+            bail!(
+                "loot table {table_id}: {pointer}: {} leaf declares max_number {high} below min_number {low}",
+                kind.as_str_name()
+            );
+        }
+        Ok((low, high))
+    };
+
+    match document.node.as_str() {
+        kind @ ("and" | "or") => {
+            if depth > MAX_LOOT_TREE_DEPTH {
+                bail!(
+                    "loot table {table_id}: {pointer}: container depth {depth} exceeds MAX_TREE_DEPTH of {MAX_LOOT_TREE_DEPTH}"
+                );
+            }
+            if document.entries.len() != document.chances.len() {
+                bail!(
+                    "loot table {table_id}: {pointer}: {kind} node has {} entries but {} chances; they are positionally paired",
+                    document.entries.len(),
+                    document.chances.len()
+                );
+            }
+            if document.entries.is_empty() {
+                bail!("loot table {table_id}: {pointer}: {kind} node has no entries");
+            }
+            let mut entries = Vec::with_capacity(document.entries.len());
+            for (index, child) in document.entries.iter().enumerate() {
+                entries.push(loot_node(
+                    child,
+                    table_id,
+                    &format!("{pointer}/entries/{index}"),
+                    known_items,
+                    depth + 1,
+                )?);
+            }
+            Ok(proto::LootNode {
+                kind: if kind == "and" {
+                    proto::LootNodeKind::And as i32
+                } else {
+                    proto::LootNodeKind::Or as i32
+                },
+                entries,
+                chances: document.chances.clone(),
+                ..Default::default()
+            })
+        }
+        "single-item" => {
+            let (min_number, max_number) = counts(proto::LootNodeKind::SingleItem)?;
+            let item_id = document
+                .item
+                .as_ref()
+                .and_then(|reference| reference.id.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "loot table {table_id}: {pointer}: single-item leaf names no item id"
+                    )
+                })?;
+            // ADR 0006's cross-reference check. A grant the pack cannot resolve
+            // to a stack limit has no way to reach a bag slot.
+            if !known_items.contains(item_id.as_str()) {
+                bail!(
+                    "loot table {table_id}: {pointer}: grants {item_id}, which this pack does not carry as an item"
+                );
+            }
+            Ok(proto::LootNode {
+                kind: proto::LootNodeKind::SingleItem as i32,
+                item_id,
+                min_number,
+                max_number,
+                ..Default::default()
+            })
+        }
+        "money" => {
+            let (min_number, max_number) = counts(proto::LootNodeKind::Money)?;
+            if document.item.is_some() {
+                bail!(
+                    "loot table {table_id}: {pointer}: money leaf carries an item reference; money credits the purse and occupies no bag slot"
+                );
+            }
+            Ok(proto::LootNode {
+                kind: proto::LootNodeKind::Money as i32,
+                min_number,
+                max_number,
+                ..Default::default()
+            })
+        }
+        other => bail!("loot table {table_id}: {pointer}: unknown node type {other:?}"),
+    }
 }
 
 fn zone_row(
