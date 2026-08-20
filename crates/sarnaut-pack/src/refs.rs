@@ -156,12 +156,13 @@ impl LocaleIndex {
     /// **nothing** into the row.
     ///
     /// That is an ADR 0011 rule, not a stylistic one. An authored key the pack
-    /// cannot resolve is a verbatim MY.GAMES resource path, and some of them
-    /// embed a type name — `HealElixir.(ItemResource).txt` is one this tree
-    /// actually holds. A key that resolves has been replaced by a locale
-    /// document's own key and is safe; an unresolved one is a source string,
-    /// and source strings do not go in packs. The shard falls back to the
-    /// canonical id, which this project owns.
+    /// cannot resolve is a verbatim MY.GAMES resource path, and some of those
+    /// paths carry the source resource's class name in parentheses, so writing
+    /// one into a table would put a MY.GAMES type name in a compiled artifact.
+    /// A key that resolves has been replaced by a locale document's own key and
+    /// is safe; an unresolved one is a source string, and source strings do not
+    /// go in packs. The shard falls back to the canonical id, which this
+    /// project owns.
     pub fn resolve(&self, authored: &str, source: &Provenance) -> Resolved {
         for candidate in candidates(authored, &source.path) {
             if self.keys.contains(&candidate) {
