@@ -115,6 +115,25 @@ pub(crate) fn canonical_id_from_source_path(path: &str) -> Option<String> {
     }
 }
 
+/// Mint a canonical id after the caller has already parsed and type-checked a
+/// `MobKind` document. Classic character kinds do not consistently carry the
+/// `.(MobKind)` marker in their file name, so the context-free mapper above must
+/// leave them alone while the MobKind resolver can map them safely.
+pub(crate) fn mobkind_id_from_source_path(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.first() == Some(&"Mechanics")
+        && matches!(parts.get(1), Some(&"Creatures") | Some(&"Characters"))
+        && parts.len() >= 3
+    {
+        return Some(format!("mobkind.{}", slug_path(&parts[1..])));
+    }
+    canonical_id_from_source_path(path)
+}
+
 /// Slug a path tail into one hyphenated segment, for ids the schemas cap at two dots.
 fn flat_slug(parts: &[&str]) -> String {
     let segments: Vec<String> = parts
@@ -242,6 +261,16 @@ mod tests {
         assert_eq!(
             canonical_id_from_source_path("Mechanics/ItemQualities/Common.xdb"),
             None
+        );
+    }
+
+    #[test]
+    fn mints_markerless_character_kind_ids_only_in_typed_context() {
+        let path = "Mechanics/Characters/Kania_male/ZoneLeague1/Aidenus.xdb";
+        assert_eq!(canonical_id_from_source_path(path), None);
+        assert_eq!(
+            mobkind_id_from_source_path(path),
+            Some("mobkind.characters.kania-male.zone-league1.aidenus".into())
         );
     }
 }

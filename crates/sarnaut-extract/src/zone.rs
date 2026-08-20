@@ -12,7 +12,7 @@ use crate::model::{
 };
 use crate::output::OutputWriter;
 use crate::reference::{canonical_id_from_source_path, resource_ref, slug, slug_path};
-use crate::scan::{find_named_directory, sorted_xdb_files, zone_instance_files};
+use crate::scan::{find_named_directory, loc_key, sorted_xdb_files, zone_instance_files};
 use crate::validation::SchemaKind;
 use crate::xdb::{
     bool_value, child, children, extra_fields, f64_value, href, i64_value, node_value, orientation,
@@ -65,6 +65,8 @@ pub fn extract_zone(name: &str, options: &ExtractionOptions) -> Result<ZoneSumma
             id.clone(),
             zone_slug.clone(),
             starters.get(&id).cloned(),
+            &options.src,
+            &path,
             xdb.source,
         );
         let file_slug = id
@@ -232,13 +234,20 @@ fn load_mobs(src: &Path, zone: &str) -> Result<Vec<(PathBuf, MobDocument)>> {
         }
         let id = canonical_id_from_source_path(&xdb.source.path)
             .with_context(|| format!("build mob ID from {}", xdb.source.path))?;
-        let document = mob_document(root, id, &slug(zone), xdb.source);
+        let document = mob_document(root, id, &slug(zone), src, &path, xdb.source);
         documents.push((path, document));
     }
     Ok(documents)
 }
 
-fn mob_document(root: Node<'_, '_>, id: String, zone: &str, source: Provenance) -> MobDocument {
+fn mob_document(
+    root: Node<'_, '_>,
+    id: String,
+    zone: &str,
+    src: &Path,
+    path: &Path,
+    source: Provenance,
+) -> MobDocument {
     let quests = child(root, "interactions")
         .and_then(|node| child(node, "availableQuests"))
         .map(|node| {
@@ -266,8 +275,8 @@ fn mob_document(root: Node<'_, '_>, id: String, zone: &str, source: Provenance) 
         source_type: root.tag_name().name().to_owned(),
         resource_id: resource_id(root),
         loc_ref: LocRefs {
-            name: href(root, "name"),
-            title: href(root, "title"),
+            name: localized_href(root, "name", src, path),
+            title: localized_href(root, "title", src, path),
             ..LocRefs::default()
         },
         visual_ref: href(root, "visMob"),
@@ -305,6 +314,8 @@ fn quest_document(
     id: String,
     zone: String,
     starter: Option<ResourceRef>,
+    src: &Path,
+    path: &Path,
     source: Provenance,
 ) -> QuestDocument {
     let finisher = child(root, "finisher")
@@ -326,7 +337,11 @@ fn quest_document(
         })
         .unwrap_or_default();
     let objectives = child(root, "counters")
-        .map(|node| children(node, "Item").map(quest_objective).collect())
+        .map(|node| {
+            children(node, "Item")
+                .map(|item| quest_objective(item, src, path))
+                .collect()
+        })
         .unwrap_or_default();
     let rewards = child(root, "reward").map(quest_rewards).unwrap_or_default();
     let mut flags = BTreeMap::new();
@@ -351,11 +366,11 @@ fn quest_document(
         resource_id: resource_id(root),
         internal_name: text(root, "internalName"),
         loc_ref: LocRefs {
-            name: href(root, "name"),
-            goal: href(root, "goal"),
-            start: href(root, "startText"),
-            check: href(root, "checkText"),
-            finish: href(root, "finishText"),
+            name: localized_href(root, "name", src, path),
+            goal: localized_href(root, "goal", src, path),
+            start: localized_href(root, "startText", src, path),
+            check: localized_href(root, "checkText", src, path),
+            finish: localized_href(root, "finishText", src, path),
             ..LocRefs::default()
         },
         level: i64_value(root, "level"),
@@ -398,7 +413,7 @@ fn quest_document(
     }
 }
 
-fn quest_objective(node: Node<'_, '_>) -> QuestObjective {
+fn quest_objective(node: Node<'_, '_>, src: &Path, path: &Path) -> QuestObjective {
     let mut targets = Vec::new();
     for collection in ["items", "objects", "mobs"] {
         if let Some(parent) = child(node, collection) {
@@ -416,7 +431,7 @@ fn quest_objective(node: Node<'_, '_>) -> QuestObjective {
             .map(type_tail)
             .map(slug)
             .unwrap_or_else(|| "unknown".into()),
-        loc_ref: href(node, "customName"),
+        loc_ref: localized_href(node, "customName", src, path),
         limit: i64_value(node, "limit"),
         internal: bool_value(node, "isInternal"),
         show_count: bool_value(node, "showCounterValue"),
@@ -434,6 +449,10 @@ fn quest_objective(node: Node<'_, '_>) -> QuestObjective {
             ],
         ),
     }
+}
+
+fn localized_href(node: Node<'_, '_>, name: &str, src: &Path, path: &Path) -> Option<String> {
+    href(node, name).and_then(|value| loc_key(src, path, &value))
 }
 
 fn quest_rewards(node: Node<'_, '_>) -> QuestRewards {
@@ -740,5 +759,24 @@ mod tests {
         assert!(quest.contains("kind: quest-count-kill"));
         assert!(quest.contains("experience: 5"));
         assert!(quest.contains("unknown: kept"));
+        assert!(
+            quest.contains("name: World/Quests/TestZone/First/Name"),
+            "{quest}"
+        );
+        assert!(
+            quest.contains("loc_ref: World/Quests/TestZone/First/Counter"),
+            "{quest}"
+        );
+
+        let mob = fs::read_to_string(
+            output
+                .path()
+                .join("zones/test-zone/spawns/mobs/human.guide.yaml"),
+        )
+        .unwrap();
+        assert!(
+            mob.contains("name: Characters/Human/Instances/TestZone/Guide"),
+            "{mob}"
+        );
     }
 }

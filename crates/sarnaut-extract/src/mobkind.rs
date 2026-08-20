@@ -19,7 +19,7 @@ use crate::model::{
     MobQualityDocument, Provenance, ResourceRef,
 };
 use crate::output::OutputWriter;
-use crate::reference::{canonical_id_from_source_path, resource_ref};
+use crate::reference::{canonical_id_from_source_path, mobkind_id_from_source_path, resource_ref};
 use crate::scan::{loc_key, resolve_href, sort_paths, zone_instance_files};
 use crate::validation::SchemaKind;
 use crate::xdb::{
@@ -236,7 +236,7 @@ impl<'a> KindResolver<'a> {
                 root.tag_name().name()
             );
         }
-        let id = canonical_id_from_source_path(relative)
+        let id = mobkind_id_from_source_path(relative)
             .with_context(|| format!("build mob kind ID from {relative}"))?;
 
         let prototype = prototype_href(root);
