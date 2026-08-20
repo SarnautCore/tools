@@ -273,3 +273,72 @@ pub fn flat_options(source: PathBuf, out: PathBuf) -> BuildOptions {
         source_commit: Some("b".repeat(40)),
     }
 }
+
+/// Adds the loot documents of `mechanics/loot.md` to a tree
+/// [`write_source`] already wrote: two items and one nested tree that grants
+/// them.
+pub fn write_loot(source: &Path) {
+    let items = source.join("classic").join("items");
+    let loot = source.join("classic").join("loot");
+    fs::create_dir_all(&items).expect("create items directory");
+    fs::create_dir_all(&loot).expect("create loot directory");
+
+    fs::write(
+        items.join("tonic.yaml"),
+        r#"schema_version: 1
+id: item.consumable.harbour-tonic
+category: consumable
+source_type: demo.ItemResource
+loc_ref:
+  name: HarbourTonic.Name.txt
+level: 2
+stack_limit: 20
+vendor_price:
+  sell: 4
+  buy: 16
+"#,
+    )
+    .expect("write item document");
+
+    fs::write(
+        items.join("shell.yaml"),
+        r#"schema_version: 1
+id: item.junk.harbour-shell
+category: junk
+source_type: demo.ItemResource
+loc_ref:
+  name: HarbourShell.Name.txt
+stack_limit: 1
+"#,
+    )
+    .expect("write unstackable item document");
+
+    fs::write(
+        loot.join("nested.yaml"),
+        r#"schema_version: 1
+id: loot.fixture.nested
+source_type: demo.LootTableResource
+root:
+  node: and
+  chances: [1.0, 0.00618751]
+  entries:
+    - node: money
+      min_number: 2
+      max_number: 4
+    - node: or
+      chances: [0.3, 0.7]
+      entries:
+        - node: single-item
+          item:
+            id: item.junk.harbour-shell
+          min_number: 1
+          max_number: 3
+        - node: single-item
+          item:
+            id: item.consumable.harbour-tonic
+          min_number: 45
+          max_number: 45
+"#,
+    )
+    .expect("write loot table document");
+}

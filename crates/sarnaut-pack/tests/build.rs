@@ -491,3 +491,157 @@ fn decode<M: Message + Default>(pack: &std::path::Path, name: &str) -> Vec<M> {
         .map(|row| M::decode(row).expect("decode row"))
         .collect()
 }
+
+#[test]
+fn a_source_tree_with_no_loot_documents_carries_no_item_or_loot_table() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    let out = workspace.path().join("pack");
+    let report = compile::build(&common::options(source, out.clone())).expect("build");
+
+    for name in ["items", "loot-tables"] {
+        assert!(
+            !report.tables.iter().any(|(table, _)| table == name),
+            "a tree with no loot documents produced a {name} table"
+        );
+        assert!(!out.join(format!("tables/{name}.sptbl")).exists());
+    }
+}
+
+#[test]
+fn loot_documents_compile_into_the_item_and_loot_tables() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    common::write_loot(&source);
+    let out = workspace.path().join("pack");
+    compile::build(&common::options(source, out.clone())).expect("build");
+
+    let items: Vec<proto::Item> = decode(&out, "items");
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["item.consumable.harbour-tonic", "item.junk.harbour-shell"],
+    );
+    assert_eq!(items[0].stack_limit, 20);
+    assert_eq!(items[0].vendor_sell, 4);
+    // Rule 5.7.6: a limit of one is a legal authored value, not a missing one.
+    assert_eq!(items[1].stack_limit, 1);
+
+    let tables: Vec<proto::LootTable> = decode(&out, "loot-tables");
+    assert_eq!(tables.len(), 1);
+    let root = tables[0].root.as_ref().expect("root node");
+    assert_eq!(root.kind, proto::LootNodeKind::And as i32);
+    assert_eq!(root.entries.len(), 2);
+
+    // The eight-digit chance survives the round trip bit for bit. It is not
+    // representable in binary32, so a `float` field would fail here.
+    assert_eq!(root.chances, vec![1.0_f64, 0.006_187_51_f64]);
+
+    let money = &root.entries[0];
+    assert_eq!(money.kind, proto::LootNodeKind::Money as i32);
+    assert_eq!((money.min_number, money.max_number), (2, 4));
+    assert!(money.item_id.is_empty(), "money carries no item reference");
+
+    let inner = &root.entries[1];
+    assert_eq!(inner.kind, proto::LootNodeKind::Or as i32);
+    assert_eq!(inner.chances, vec![0.3_f64, 0.7_f64]);
+    assert_eq!(inner.entries[0].item_id, "item.junk.harbour-shell");
+    assert_eq!(inner.entries[1].max_number, 45);
+}
+
+#[test]
+fn a_loot_tree_whose_chances_do_not_pair_with_its_entries_is_refused() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    common::write_loot(&source);
+    fs::write(
+        source.join("classic/loot/nested.yaml"),
+        r#"schema_version: 1
+id: loot.fixture.unpaired
+source_type: demo.LootTableResource
+root:
+  node: and
+  chances: [1.0]
+  entries:
+    - node: money
+      min_number: 1
+      max_number: 1
+    - node: money
+      min_number: 2
+      max_number: 2
+"#,
+    )
+    .expect("rewrite loot document");
+
+    let error = compile::build(&common::options(source, workspace.path().join("pack")))
+        .expect_err("build should reject an unpaired chances array");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("2 entries but 1 chances"),
+        "error does not name the pairing: {message}"
+    );
+}
+
+#[test]
+fn a_loot_grant_of_an_item_the_pack_does_not_carry_is_refused() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    common::write_loot(&source);
+    fs::write(
+        source.join("classic/loot/nested.yaml"),
+        r#"schema_version: 1
+id: loot.fixture.dangling
+source_type: demo.LootTableResource
+root:
+  node: and
+  chances: [1.0]
+  entries:
+    - node: single-item
+      item:
+        id: item.junk.does-not-exist
+      min_number: 1
+      max_number: 1
+"#,
+    )
+    .expect("rewrite loot document");
+
+    let error = compile::build(&common::options(source, workspace.path().join("pack")))
+        .expect_err("build should reject a dangling item reference");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("item.junk.does-not-exist"),
+        "error does not name the missing item: {message}"
+    );
+}
+
+#[test]
+fn a_loot_leaf_whose_counts_are_inverted_is_refused() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    common::write_loot(&source);
+    fs::write(
+        source.join("classic/loot/nested.yaml"),
+        r#"schema_version: 1
+id: loot.fixture.inverted
+source_type: demo.LootTableResource
+root:
+  node: and
+  chances: [1.0]
+  entries:
+    - node: money
+      min_number: 9
+      max_number: 2
+"#,
+    )
+    .expect("rewrite loot document");
+
+    let error = compile::build(&common::options(source, workspace.path().join("pack")))
+        .expect_err("build should reject inverted counts");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("max_number 2 below min_number 9"),
+        "error does not name the counts: {message}"
+    );
+}
