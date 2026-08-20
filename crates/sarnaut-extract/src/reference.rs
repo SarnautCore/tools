@@ -81,8 +81,48 @@ pub(crate) fn canonical_id_from_source_path(path: &str) -> Option<String> {
             let tail = slug_path(&parts[4..]);
             Some(format!("spawn.{zone}.table.{tail}"))
         }
+        "World" if parts.get(1) == Some(&"LootTables") && parts.len() >= 4 => {
+            Some(format!("loot.{}", slug_path(&parts[2..])))
+        }
+        // Factions live under two roots that never collide on file name; both flatten
+        // to a single slug because faction ids are two segments by schema.
+        "World" if parts.get(1) == Some(&"Factions") && parts.len() >= 3 => {
+            Some(format!("faction.{}", flat_slug(&parts[2..])))
+        }
+        "Mechanics" if parts.get(1) == Some(&"Faction") && parts.len() >= 3 => {
+            Some(format!("faction.{}", flat_slug(&parts[2..])))
+        }
+        "Mechanics" if parts.get(1) == Some(&"MobClasses") && parts.len() == 3 => {
+            Some(format!("mobclass.{}", flat_slug(&parts[2..])))
+        }
+        "Mechanics" if parts.get(1) == Some(&"MobQualities") && parts.len() == 3 => {
+            Some(format!("mobquality.{}", flat_slug(&parts[2..])))
+        }
+        "Mechanics" if parts.get(1) == Some(&"MobKindTemplates") && parts.len() == 3 => Some(
+            format!("mobkind.mob-kind-templates.{}", flat_slug(&parts[2..])),
+        ),
+        // `Mechanics/Creatures` and `Mechanics/Characters` mix mob kinds with ability
+        // kits and roaming data, so only the `(MobKind)` resource marker mints a
+        // mobkind id; anything else there stays unmapped rather than mislabelled.
+        "Mechanics"
+            if matches!(parts.get(1), Some(&"Creatures") | Some(&"Characters"))
+                && parts.len() >= 3
+                && parts[parts.len() - 1].contains(".(MobKind)") =>
+        {
+            Some(format!("mobkind.{}", slug_path(&parts[1..])))
+        }
         _ => None,
     }
+}
+
+/// Slug a path tail into one hyphenated segment, for ids the schemas cap at two dots.
+fn flat_slug(parts: &[&str]) -> String {
+    let segments: Vec<String> = parts
+        .iter()
+        .map(|part| slug(strip_xdb_suffix(part)))
+        .filter(|part| !part.is_empty())
+        .collect();
+    bounded_slug(&segments.join("-"), 120)
 }
 
 pub(crate) fn slug_path(parts: &[&str]) -> String {
@@ -153,6 +193,55 @@ mod tests {
                 "/Items/QuestItems/Test/Test.(ItemResource).xdb#xpointer(/ItemResource)"
             ),
             Some("item.quest-items.test.test-item-resource".into())
+        );
+    }
+
+    #[test]
+    fn mints_ids_for_the_creature_taxonomy_loot_and_factions() {
+        assert_eq!(
+            canonical_id_from_source_path(
+                "Mechanics/Creatures/ZombieWarrior/ZombieWarriorStartInstKind.(MobKind).xdb"
+            ),
+            Some("mobkind.creatures.zombie-warrior.zombie-warrior-start-inst-kind".into())
+        );
+        assert_eq!(
+            canonical_id_from_source_path("Mechanics/MobKindTemplates/AE1Player.xdb"),
+            Some("mobkind.mob-kind-templates.ae1player".into())
+        );
+        assert_eq!(
+            canonical_id_from_source_path("Mechanics/MobClasses/UDZombieFighter.xdb"),
+            Some("mobclass.ud-zombie-fighter".into())
+        );
+        assert_eq!(
+            canonical_id_from_source_path("Mechanics/MobQualities/Common.xdb"),
+            Some("mobquality.common".into())
+        );
+        assert_eq!(
+            canonical_id_from_source_path("World/Factions/Wild.xdb"),
+            Some("faction.wild".into())
+        );
+        assert_eq!(
+            canonical_id_from_source_path("World/Factions/ZoneLeague1/CityOrder.(Faction).xdb"),
+            Some("faction.zone-league1-city-order".into())
+        );
+        assert_eq!(
+            canonical_id_from_source_path("World/LootTables/ZombieWarrior/ZombieWarrior(01).xdb"),
+            Some("loot.zombie-warrior.zombie-warrior-01".into())
+        );
+    }
+
+    #[test]
+    fn leaves_neighbouring_mechanics_resources_unmapped() {
+        // An ability kit sits in the same directory as the mob kind it belongs to.
+        assert_eq!(
+            canonical_id_from_source_path(
+                "Mechanics/Creatures/ZombieWarrior/ZombieWarriorStartInstKit.(MobAbilityKit).xdb"
+            ),
+            None
+        );
+        assert_eq!(
+            canonical_id_from_source_path("Mechanics/ItemQualities/Common.xdb"),
+            None
         );
     }
 }

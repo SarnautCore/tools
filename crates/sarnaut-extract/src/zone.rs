@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use roxmltree::Node;
-use walkdir::WalkDir;
 
 use crate::model::{
     ExtractionOptions, LocRefs, MobDocument, PlacementDocument, Provenance, QuestDocument,
@@ -13,6 +12,7 @@ use crate::model::{
 };
 use crate::output::OutputWriter;
 use crate::reference::{canonical_id_from_source_path, resource_ref, slug, slug_path};
+use crate::scan::{find_named_directory, sorted_xdb_files, zone_instance_files};
 use crate::validation::SchemaKind;
 use crate::xdb::{
     bool_value, child, children, extra_fields, f64_value, href, i64_value, node_value, orientation,
@@ -220,41 +220,8 @@ fn resolve_zone(src: &Path, requested: &str) -> Result<ResolvedZone> {
     })
 }
 
-fn find_named_directory(root: &Path, name: &str) -> Option<PathBuf> {
-    let requested_slug = slug(name);
-    fs::read_dir(root)
-        .ok()?
-        .filter_map(Result::ok)
-        .find_map(|entry| {
-            let is_dir = entry.file_type().ok()?.is_dir();
-            let entry_name = entry.file_name().to_string_lossy().into_owned();
-            (is_dir
-                && (entry_name.eq_ignore_ascii_case(name) || slug(&entry_name) == requested_slug))
-                .then(|| entry.path())
-        })
-}
-
 fn load_mobs(src: &Path, zone: &str) -> Result<Vec<(PathBuf, MobDocument)>> {
-    let mut directories = Vec::new();
-    for family_root in [src.join("Characters"), src.join("Creatures")] {
-        if !family_root.is_dir() {
-            continue;
-        }
-        for entry in fs::read_dir(family_root)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir()
-                && let Some(directory) = find_named_directory(&entry.path().join("Instances"), zone)
-            {
-                directories.push(directory);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    for directory in directories {
-        files.extend(sorted_xdb_files(&directory)?);
-    }
-    files.sort_by_cached_key(|path| path.to_string_lossy().to_ascii_lowercase());
-
+    let files = zone_instance_files(src, zone)?;
     let mut documents = Vec::new();
     for path in files {
         let xdb = read_xdb(&path, src)?;
@@ -699,27 +666,6 @@ fn type_tail(value: &str) -> &str {
     value.rsplit('.').next().unwrap_or(value)
 }
 
-fn sorted_xdb_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut files: Vec<PathBuf> = WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|entry| match entry {
-            Ok(entry)
-                if entry.file_type().is_file()
-                    && entry.path().extension().is_some_and(|extension| {
-                        extension.to_string_lossy().eq_ignore_ascii_case("xdb")
-                    }) =>
-            {
-                Some(Ok(entry.into_path()))
-            }
-            Ok(_) => None,
-            Err(error) => Some(Err(anyhow::Error::from(error))),
-        })
-        .collect::<Result<_>>()?;
-    files.sort_by_cached_key(|path| path.to_string_lossy().to_ascii_lowercase());
-    Ok(files)
-}
-
 fn server_object_files(map_root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = sorted_xdb_files(map_root)?;
     files.retain(|path| {
@@ -734,11 +680,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-
-    fn write(path: &Path, contents: &str) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, contents).unwrap();
-    }
+    use crate::testing::write;
 
     #[test]
     fn extracts_quest_mob_spawn_and_patrol_route() {

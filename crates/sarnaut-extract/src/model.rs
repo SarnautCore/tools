@@ -12,6 +12,15 @@ pub struct ExtractionOptions {
     pub schema_dir: Option<PathBuf>,
 }
 
+/// Locale extraction reads a second source root, because the reference tree ships
+/// only a fraction of the display strings its own resources point at.
+#[derive(Debug, Clone)]
+pub struct LocaleOptions {
+    pub common: ExtractionOptions,
+    pub language: String,
+    pub supplemental_src: Option<PathBuf>,
+}
+
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ItemSummary {
     pub emitted: usize,
@@ -32,11 +41,64 @@ pub struct ZoneSummary {
     pub unchanged: usize,
 }
 
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct MobKindSummary {
+    pub zone: String,
+    pub mob_worlds: usize,
+    pub mob_kinds: usize,
+    pub prototypes: usize,
+    pub mob_classes: usize,
+    pub mob_qualities: usize,
+    pub factions: usize,
+    pub unchanged: usize,
+}
+
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct LootSummary {
+    pub zone: String,
+    pub tables: usize,
+    pub nodes: usize,
+    pub item_index: usize,
+    pub dangling_items: Vec<String>,
+    pub unchanged: usize,
+}
+
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct LocaleSummary {
+    pub zone: String,
+    pub language: String,
+    pub requested: usize,
+    pub resolved: usize,
+    pub unresolved: Vec<String>,
+    pub from_primary: usize,
+    pub from_supplemental: usize,
+    pub mismatched: Vec<String>,
+    /// How many payloads each detected encoding accounted for.
+    pub encodings: BTreeMap<String, usize>,
+    pub unchanged: usize,
+}
+
+impl LocaleSummary {
+    /// Share of distinct `loc_ref` targets no source root could supply, in percent.
+    pub fn unresolved_rate(&self) -> f64 {
+        if self.requested == 0 {
+            return 0.0;
+        }
+        (self.unresolved.len() as f64) * 100.0 / (self.requested as f64)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provenance {
     pub path: String,
     pub blake3: String,
     pub extractor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root: Option<String>,
+    /// Prototype documents merged into this one, in application order, ending with
+    /// this document's own id. Only prototype-resolving extractors set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prototype_chain: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -409,4 +471,169 @@ pub struct RouteLink {
     pub movement: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flying: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MobKindDocument {
+    pub schema_version: u8,
+    pub id: String,
+    pub kind: String,
+    pub source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<u64>,
+    #[serde(skip_serializing_if = "LocRefs::is_empty")]
+    pub loc_ref: LocRefs,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prototype: Option<ResourceRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mob_class: Option<ResourceRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<ResourceRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hp_mod: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dps_mod: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exp_mod: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mana_mod: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loot_mod: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed: Option<f64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source")]
+    pub source: Provenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MobClassDocument {
+    pub schema_version: u8,
+    pub id: String,
+    pub kind: String,
+    pub source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<u64>,
+    #[serde(skip_serializing_if = "LocRefs::is_empty")]
+    pub loc_ref: LocRefs,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source")]
+    pub source: Provenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MobQualityDocument {
+    pub schema_version: u8,
+    pub id: String,
+    pub kind: String,
+    pub rank: u8,
+    pub source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<u64>,
+    #[serde(skip_serializing_if = "LocRefs::is_empty")]
+    pub loc_ref: LocRefs,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source")]
+    pub source: Provenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactionDocument {
+    pub schema_version: u8,
+    pub id: String,
+    pub source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<u64>,
+    #[serde(skip_serializing_if = "LocRefs::is_empty")]
+    pub loc_ref: LocRefs,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub player_faction: Option<bool>,
+    pub attackable: bool,
+    pub default_stance: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub relations: Vec<FactionRelation>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source")]
+    pub source: Provenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactionRelation {
+    pub faction: String,
+    pub stance: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LootTableDocument {
+    pub schema_version: u8,
+    pub id: String,
+    pub source_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<u64>,
+    pub root: LootNode,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source")]
+    pub source: Provenance,
+}
+
+/// One loot node. `entries` and `chances` are positionally paired; the extractor
+/// rejects a length mismatch outright rather than truncating to the shorter array,
+/// because a truncated tree still validates and would drop drops silently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LootNode {
+    Container {
+        node: String,
+        entries: Vec<LootNode>,
+        chances: Vec<f64>,
+    },
+    SingleItem {
+        node: String,
+        item: ResourceRef,
+        min_number: i64,
+        max_number: i64,
+    },
+    Money {
+        node: String,
+        min_number: i64,
+        max_number: i64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemIndexDocument {
+    pub schema_version: u8,
+    pub id: String,
+    pub kind: String,
+    pub count: usize,
+    /// Canonical item id to the ruleset-relative YAML that defines it.
+    pub entries: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocaleDocument {
+    pub schema_version: u8,
+    pub id: String,
+    pub language: String,
+    pub source_root: String,
+    pub source_type: String,
+    pub entries: Vec<LocaleEntry>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source")]
+    pub source: Provenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocaleEntry {
+    pub key: String,
+    pub text: String,
+    /// Set only when this key came from a root other than the document's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_root: Option<String>,
 }

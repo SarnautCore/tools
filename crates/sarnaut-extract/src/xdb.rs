@@ -15,6 +15,15 @@ pub(crate) struct XdbFile {
 }
 
 pub(crate) fn read_xdb(path: &Path, root: &Path) -> Result<XdbFile> {
+    read_xdb_from(path, root, None)
+}
+
+/// Read one XDB, recording which canonical source root (ADR 0009) supplied it.
+pub(crate) fn read_xdb_from(
+    path: &Path,
+    root: &Path,
+    source_root: Option<&str>,
+) -> Result<XdbFile> {
     let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let hash = blake3::hash(&bytes).to_hex().to_string();
     let text =
@@ -25,8 +34,25 @@ pub(crate) fn read_xdb(path: &Path, root: &Path) -> Result<XdbFile> {
             path: source_path(path, root)?,
             blake3: hash,
             extractor: format!("sarnaut-extract@{}", env!("CARGO_PKG_VERSION")),
+            source_root: source_root.map(ToOwned::to_owned),
+            prototype_chain: None,
         },
     })
+}
+
+/// The `href` on `Header/Prototype`, the XDB inheritance edge.
+pub(crate) fn prototype_href(root: Node<'_, '_>) -> Option<String> {
+    child(root, "Header").and_then(|header| href(header, "Prototype"))
+}
+
+/// Every `href` attribute below `node`, in document order.
+pub(crate) fn descendant_hrefs(node: Node<'_, '_>) -> Vec<String> {
+    node.descendants()
+        .filter(Node::is_element)
+        .filter_map(|element| element.attribute("href"))
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 pub(crate) fn child<'a, 'input>(node: Node<'a, 'input>, name: &str) -> Option<Node<'a, 'input>> {
