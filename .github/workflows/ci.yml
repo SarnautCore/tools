@@ -88,3 +88,39 @@ jobs:
             echo "the fixture pack was built with --keep-extra" >&2
             exit 1
           fi
+
+      # The demo dataset's one overlay layer is `apply_by_default: false`, so
+      # the packs above must not carry it and this one must. A layer that
+      # switched itself on would move the vendored fixture's digest silently.
+      - name: Build the overlaid fixture pack
+        run: |
+          cargo run --quiet -p sarnaut-pack -- build --fixture \
+            --src data-schemas/demo --overlay m2-combat-extended \
+            --out "$RUNNER_TEMP/pack-extended"
+
+      - name: Assert the overlay changed the pack and the base did not carry it
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          temp = os.environ["RUNNER_TEMP"]
+          base = json.load(open(f"{temp}/pack-first/manifest.json"))
+          extended = json.load(open(f"{temp}/pack-extended/manifest.json"))
+          if base["source"]["overlays"]:
+              sys.exit(f"the base fixture applied {base['source']['overlays']}")
+          if extended["source"]["overlays"] != ["m2-combat-extended"]:
+              sys.exit(f"the overlaid fixture applied {extended['source']['overlays']}")
+          if base["pack_id"] == extended["pack_id"]:
+              sys.exit("applying a layer left pack_id unchanged")
+          PY
+
+      # No MY.GAMES type or attribute name may reach a compiled artifact
+      # (ADR 0011). The demo dataset is invented, so any hit here is the
+      # compiler leaking a source string rather than the data carrying one.
+      - name: Assert no source type names reached the table bytes
+        run: |
+          if grep --recursive --quiet --extended-regexp \
+              'gameMechanics|mapLoader|xpointer|\.xdb' \
+              "$RUNNER_TEMP/pack-first/tables"; then
+            echo "a compiled table carries a source resource path" >&2
+            exit 1
+          fi

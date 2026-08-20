@@ -11,10 +11,10 @@ fn a_freshly_built_pack_verifies() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    let report = compile::build(&common::options(source, out.clone())).expect("build");
+    let report = compile::build(&common::options(source), &out).expect("build");
 
     let verified = verify::verify(&out).expect("verify");
-    assert_eq!(verified.pack_id, report.pack_id);
+    assert_eq!(verified.pack_id, report.pack_id());
     assert_eq!(verified.zone, common::ZONE);
 }
 
@@ -23,7 +23,7 @@ fn one_flipped_table_byte_is_reported_as_a_digest_mismatch() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    compile::build(&common::options(source, out.clone())).expect("build");
+    compile::build(&common::options(source), &out).expect("build");
 
     let table = out.join("tables/placements.sptbl");
     let mut bytes = fs::read(&table).expect("read table");
@@ -44,7 +44,7 @@ fn an_unsupported_schema_version_is_rejected() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    compile::build(&common::options(source, out.clone())).expect("build");
+    compile::build(&common::options(source), &out).expect("build");
 
     let path = out.join("manifest.json");
     let text = fs::read_to_string(&path).expect("read manifest");
@@ -66,7 +66,7 @@ fn a_table_the_manifest_does_not_list_is_rejected() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    compile::build(&common::options(source, out.clone())).expect("build");
+    compile::build(&common::options(source), &out).expect("build");
 
     fs::write(out.join("tables/stowaway.sptbl"), b"SPK1").expect("write stray table");
 
@@ -82,11 +82,11 @@ fn a_rewritten_pack_id_is_rejected() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    let report = compile::build(&common::options(source, out.clone())).expect("build");
+    let report = compile::build(&common::options(source), &out).expect("build");
 
     let path = out.join("manifest.json");
     let text = fs::read_to_string(&path).expect("read manifest");
-    fs::write(&path, text.replace(&report.pack_id, &"0".repeat(64))).expect("rewrite manifest");
+    fs::write(&path, text.replace(report.pack_id(), &"0".repeat(64))).expect("rewrite manifest");
 
     let error = verify::verify(&out).expect_err("verify should reject a rewritten pack_id");
     assert!(
