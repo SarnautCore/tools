@@ -1,0 +1,13 @@
+schema_version: 1
+id: quest.fixture.unservable-01
+objectives:
+- kind: quest-count-item
+  limit: 1
+  targets:
+  - id: item.fixture
+- kind: quest-count-kill
+  limit: 0
+  targets:
+  - id: mob.fixture
+- kind: quest-count-special
+  limit: 1
