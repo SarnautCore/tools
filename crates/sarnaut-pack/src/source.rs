@@ -27,14 +27,18 @@ pub struct SourceTree {
     pub mob_kinds: Vec<MobKindDocument>,
     pub abilities: Vec<AbilityDocument>,
     pub factions: Vec<FactionDocument>,
+    pub chargen_options: Vec<ChargenDocument>,
 }
 
-/// The localization keys a document carries. Only `name` reaches a pack row;
-/// the rest are read by the client from the locale tables (ADR 0007).
+/// The localization keys a document carries. Only `name` reaches most pack
+/// rows; chargen options also carry `description`, and the rest are read by the
+/// client from the locale tables (ADR 0007).
 #[derive(Debug, Default, Deserialize)]
 pub struct LocRef {
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// One creature record: the combat inputs of `mechanics/combat.md` section 4.
@@ -192,6 +196,56 @@ pub struct SourceTableEntry {
     pub spawn_time: Option<String>,
 }
 
+/// One character-creation option (ADR 0032).
+///
+/// A chargen document carries no `kind`, so it is recognised by its canonical
+/// `chargen.` id prefix. It is also the only global document type the compiler
+/// reads today: it names the zone it spawns into rather than belonging to one.
+#[derive(Debug, Deserialize)]
+pub struct ChargenDocument {
+    pub id: String,
+    pub race: String,
+    pub class: String,
+    pub sex: String,
+    pub faction: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub loc_ref: Option<LocRef>,
+    pub visual_ref: String,
+    pub spawn: ChargenSpawn,
+    pub starting_level: u32,
+    #[serde(default)]
+    pub starting_stats: Vec<SourceStat>,
+    #[serde(default)]
+    pub starting_loadout: Vec<SourceLoadoutEntry>,
+    #[serde(default)]
+    pub starting_abilities: Vec<String>,
+    #[serde(default)]
+    pub starting_quests: Vec<String>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChargenSpawn {
+    pub zone_id: String,
+    pub position: Position,
+    pub heading: f32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SourceStat {
+    pub stat: String,
+    pub value: f32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SourceLoadoutEntry {
+    pub item_id: String,
+    pub quantity: u32,
+    pub slot: String,
+}
+
 /// A reference to another authored document.
 ///
 /// The `href` sibling in the authored YAML is a verbatim MY.GAMES resource path
@@ -248,6 +302,10 @@ pub fn load(
             // tree yet and arrive through `--overlay` until the extractor
             // writes them.
             files.extend(optional_yaml_files(&spawns.join("mobs"))?);
+            // Chargen options are ruleset-global rather than zone-scoped
+            // (ADR 0032), so they sit beside the zones directory. A tree that
+            // has none still builds: the pack simply carries no chargen table.
+            files.extend(optional_yaml_files(&root.join(ruleset).join("chargen"))?);
             files
         }
         Layout::Flat => yaml_files(root)?,
@@ -303,9 +361,12 @@ fn read_document(tree: &mut SourceTree, document: Value, path: &Path) -> Result<
         "faction" => tree
             .factions
             .push(serde_yaml::from_value(document).with_context(|| context("faction"))?),
-        // Items, quests, routes, locales and chargen options carry no runtime
-        // rows here. A pack that needs them gets a table of its own rather
-        // than a guess in this match.
+        "chargen" => tree
+            .chargen_options
+            .push(serde_yaml::from_value(document).with_context(|| context("chargen option"))?),
+        // Items, quests, routes and locales carry no runtime rows here. A pack
+        // that needs them gets a table of its own rather than a guess in this
+        // match.
         _ => {}
     }
     Ok(())

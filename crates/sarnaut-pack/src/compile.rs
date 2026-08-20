@@ -18,6 +18,7 @@ pub const TABLE_SPAWN_TABLES: &str = "spawn-tables";
 pub const TABLE_ABILITIES: &str = "abilities";
 pub const TABLE_FACTIONS: &str = "factions";
 pub const TABLE_MOBS: &str = "mobs";
+pub const TABLE_CHARGEN: &str = "chargen";
 
 /// A mob record that names no MobKind, or one whose MobKind carries no
 /// `hp_mod`, is written with this multiplier. It matches `mechanics/combat.md`
@@ -86,9 +87,13 @@ pub fn build(options: &BuildOptions) -> Result<BuildReport> {
     let known_factions: BTreeSet<&str> = factions.iter().map(|row| row.key.as_str()).collect();
     let mobs = mob_rows(&tree, &known_abilities, &known_factions, options.keep_extra)?;
 
-    // Every table is written even when it has no rows, so a reader can insist
-    // on the full set rather than treating "absent" and "empty" as one case.
-    let encoded = vec![
+    let chargen = chargen_rows(&tree, options.keep_extra)?;
+
+    // Every gameplay table below is written even when it has no rows, so a
+    // reader can insist on the full set rather than treating "absent" and
+    // "empty" as one case. Chargen is the exception, appended after the vec
+    // only when the source tree authors one; see the comment there.
+    let mut encoded = vec![
         (
             TABLE_ZONE.to_string(),
             proto::RowType::Zone,
@@ -126,6 +131,16 @@ pub fn build(options: &BuildOptions) -> Result<BuildReport> {
             mobs.len() as u32,
         ),
     ];
+    // A source tree with no chargen documents produces no chargen table, so a
+    // pack built before ADR 0032's document type existed keeps its digest.
+    if !chargen.is_empty() {
+        encoded.push((
+            TABLE_CHARGEN.to_string(),
+            proto::RowType::ChargenOption,
+            table::encode(proto::RowType::ChargenOption as i32, &chargen)?,
+            chargen.len() as u32,
+        ));
+    }
 
     let digest_input: Vec<(String, Vec<u8>)> = encoded
         .iter()
@@ -458,6 +473,74 @@ fn mob_rows(
         };
         if seen.insert(document.id.clone(), message).is_some() {
             bail!("mob id {} is declared twice", document.id);
+        }
+    }
+    Ok(encode_rows(seen))
+}
+
+/// Compiles the character-creation options (ADR 0032).
+///
+/// Options are global rather than zone-scoped: a document names the zone it
+/// spawns into. The cross-reference this pack can actually resolve is that the
+/// named zone is a canonical `zone.` id; resolving `starting_loadout` item ids,
+/// `starting_quests` and `starting_abilities` waits for the tables that hold
+/// them, and is deliberately not faked with a prefix check.
+fn chargen_rows(tree: &SourceTree, keep_extra: bool) -> Result<Vec<Row>> {
+    let mut seen: BTreeMap<String, proto::ChargenOption> = BTreeMap::new();
+    for document in &tree.chargen_options {
+        if !document.spawn.zone_id.starts_with("zone.") {
+            bail!(
+                "chargen option {} spawns into {}, which is not a canonical zone id",
+                document.id,
+                document.spawn.zone_id
+            );
+        }
+        let loc = document.loc_ref.as_ref();
+        let message = proto::ChargenOption {
+            id: document.id.clone(),
+            race: document.race.clone(),
+            class: document.class.clone(),
+            sex: document.sex.clone(),
+            faction: document.faction.clone(),
+            enabled: document.enabled,
+            name_key: loc
+                .and_then(|reference| reference.name.clone())
+                .unwrap_or_default(),
+            description_key: loc
+                .and_then(|reference| reference.description.clone())
+                .unwrap_or_default(),
+            visual_ref: document.visual_ref.clone(),
+            spawn_zone_id: document.spawn.zone_id.clone(),
+            spawn_position: Some(proto::Vec3 {
+                x: document.spawn.position.x,
+                y: document.spawn.position.y,
+                z: document.spawn.position.z,
+            }),
+            spawn_heading: document.spawn.heading,
+            starting_level: document.starting_level,
+            starting_stats: document
+                .starting_stats
+                .iter()
+                .map(|entry| proto::StatEntry {
+                    stat: entry.stat.clone(),
+                    value: entry.value,
+                })
+                .collect(),
+            starting_loadout: document
+                .starting_loadout
+                .iter()
+                .map(|entry| proto::LoadoutEntry {
+                    item_id: entry.item_id.clone(),
+                    quantity: entry.quantity,
+                    slot: entry.slot.clone(),
+                })
+                .collect(),
+            starting_abilities: document.starting_abilities.clone(),
+            starting_quests: document.starting_quests.clone(),
+            extra: extra_map(&document.extra, keep_extra)?,
+        };
+        if seen.insert(document.id.clone(), message).is_some() {
+            bail!("chargen option id {} is declared twice", document.id);
         }
     }
     Ok(encode_rows(seen))
