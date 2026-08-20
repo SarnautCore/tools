@@ -17,11 +17,14 @@ fn two_builds_of_one_source_tree_are_byte_identical() {
 
     let first = workspace.path().join("first");
     let second = workspace.path().join("second");
-    let left =
-        compile::build(&common::options(source.clone(), first.clone())).expect("first build");
-    let right = compile::build(&common::options(source, second.clone())).expect("second build");
+    let left = compile::build(&common::options(source.clone()), &first).expect("first build");
+    let right = compile::build(&common::options(source), &second).expect("second build");
 
-    assert_eq!(left.pack_id, right.pack_id, "pack_id is not reproducible");
+    assert_eq!(
+        left.pack_id(),
+        right.pack_id(),
+        "pack_id is not reproducible"
+    );
     for relative in [
         "manifest.json",
         "tables/zone.sptbl",
@@ -44,7 +47,7 @@ fn manifest_records_every_table_and_its_digest() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    let report = compile::build(&common::options(source, out.clone())).expect("build");
+    let report = compile::build(&common::options(source), &out).expect("build");
 
     let document: Manifest = serde_json::from_str(
         &fs::read_to_string(out.join("manifest.json")).expect("read manifest"),
@@ -53,7 +56,7 @@ fn manifest_records_every_table_and_its_digest() {
 
     assert_eq!(document.schema_version, 1);
     assert_eq!(document.zone, common::ZONE);
-    assert_eq!(document.pack_id, report.pack_id);
+    assert_eq!(document.pack_id, report.pack_id());
     assert!(!document.keep_extra);
     assert_eq!(
         document
@@ -64,8 +67,12 @@ fn manifest_records_every_table_and_its_digest() {
         vec![
             "abilities",
             "factions",
+            "locale",
+            "mob-kinds",
             "mobs",
             "placements",
+            "quests",
+            "routes",
             "spawn-tables",
             "zone"
         ],
@@ -83,7 +90,7 @@ fn manifest_json_is_canonical() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    compile::build(&common::options(source, out.clone())).expect("build");
+    compile::build(&common::options(source), &out).expect("build");
 
     let text = fs::read_to_string(out.join("manifest.json")).expect("read manifest");
     assert!(text.ends_with("}\n"), "manifest has no trailing newline");
@@ -99,7 +106,7 @@ fn extra_passthrough_is_stripped_by_default() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    compile::build(&common::options(source, out.clone())).expect("build");
+    compile::build(&common::options(source), &out).expect("build");
 
     for row in decode_spawn_tables(&out) {
         assert!(
@@ -115,9 +122,9 @@ fn keep_extra_records_the_flag_and_the_values() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    let mut options = common::options(source, out.clone());
+    let mut options = common::options(source);
     options.keep_extra = true;
-    compile::build(&options).expect("build");
+    compile::build(&options, &out).expect("build");
 
     let document: Manifest = serde_json::from_str(
         &fs::read_to_string(out.join("manifest.json")).expect("read manifest"),
@@ -142,17 +149,16 @@ fn keeping_extra_changes_pack_id() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
 
-    let plain = compile::build(&common::options(
-        source.clone(),
-        workspace.path().join("plain"),
-    ))
-    .expect("plain build");
-    let mut options = common::options(source, workspace.path().join("kept"));
+    let out = workspace.path().join("plain");
+    let kept_out = workspace.path().join("kept");
+    let plain = compile::build(&common::options(source.clone()), &out).expect("plain build");
+    let mut options = common::options(source);
     options.keep_extra = true;
-    let kept = compile::build(&options).expect("keep-extra build");
+    let kept = compile::build(&options, &kept_out).expect("keep-extra build");
 
     assert_ne!(
-        plain.pack_id, kept.pack_id,
+        plain.pack_id(),
+        kept.pack_id(),
         "a pack that carries extra rows must not share a digest with one that does not"
     );
 }
@@ -162,7 +168,7 @@ fn player_spawn_defaults_to_the_first_live_placement() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    compile::build(&common::options(source, out.clone())).expect("build");
+    compile::build(&common::options(source), &out).expect("build");
 
     let zone = decode_zone(&out);
     let spawn = zone.player_spawn.expect("zone row carries a player spawn");
@@ -176,14 +182,14 @@ fn explicit_player_spawn_wins() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    let mut options = common::options(source, out.clone());
+    let mut options = common::options(source);
     options.player_spawn = Some(PlayerSpawn {
         x: -1.0,
         y: 4.0,
         z: 9.5,
         yaw: 2.5,
     });
-    compile::build(&options).expect("build");
+    compile::build(&options, &out).expect("build");
 
     let zone = decode_zone(&out);
     let spawn = zone.player_spawn.expect("zone row carries a player spawn");
@@ -196,7 +202,7 @@ fn placements_keep_their_authored_spawn_time() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    compile::build(&common::options(source, out.clone())).expect("build");
+    compile::build(&common::options(source), &out).expect("build");
 
     let bytes = fs::read(out.join("tables/placements.sptbl")).expect("read placements");
     let rows: Vec<proto::Placement> = table::rows(&bytes)
@@ -235,7 +241,7 @@ placements:
     )
     .expect("write broken placement");
 
-    let error = compile::build(&common::options(source, workspace.path().join("pack")))
+    let error = compile::compile(&common::options(source))
         .expect_err("build should reject a dangling reference");
     let message = format!("{error:#}");
     assert!(
@@ -265,7 +271,7 @@ fn combat_rows_carry_what_the_shard_reads() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_flat_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    compile::build(&common::flat_options(source, out.clone())).expect("build");
+    compile::build(&common::flat_options(source), &out).expect("build");
 
     let abilities: Vec<proto::Ability> = decode(&out, "abilities");
     assert_eq!(abilities.len(), 1);
@@ -278,10 +284,12 @@ fn combat_rows_carry_what_the_shard_reads() {
     assert_eq!(abilities[0].name_key, "Cleave.Name.txt");
 
     let factions: Vec<proto::Faction> = decode(&out, "factions");
-    assert_eq!(factions.len(), 1);
-    assert!(factions[0].attackable);
-    assert_eq!(factions[0].default_stance, "hostile");
-    assert_eq!(factions[0].relations[0].faction_id, "faction.league");
+    assert_eq!(factions.len(), 2);
+    let wild = &factions[1];
+    assert_eq!(wild.id, "faction.wild");
+    assert!(wild.attackable);
+    assert_eq!(wild.default_stance, "hostile");
+    assert_eq!(wild.relations[0].faction_id, "faction.league");
 
     let mobs: Vec<proto::Mob> = decode(&out, "mobs");
     assert_eq!(mobs.len(), 1);
@@ -304,12 +312,19 @@ fn combat_rows_carry_what_the_shard_reads() {
 fn an_overlay_adds_documents_and_is_recorded_in_the_manifest() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_flat_source(&workspace.path().join("src"));
-    let overlay = workspace.path().join("extended");
-    fs::create_dir_all(&overlay).expect("create overlay directory");
-    fs::write(
-        overlay.join("ability.brine-bolt.yaml"),
-        r#"schema_version: 1
+
+    // Built before the layer exists, so the two packs differ only by the layer.
+    let base = workspace.path().join("base-pack");
+    compile::build(&common::flat_options(source.clone()), &base).expect("base build");
+
+    common::write_layer(
+        &source,
+        "extended",
+        &[(
+            "ability.brine-bolt.yaml",
+            r#"schema_version: 1
 id: ability.magic.brine-bolt
+curation_note: A second ability, so that adding one is a data change.
 source_type: demo.SpellResource
 target: enemy
 range_m: 25.0
@@ -321,15 +336,11 @@ effects:
     amount: 30
     attack_power_coeff: 0.25
 "#,
-    )
-    .expect("write overlay ability");
+        )],
+    );
 
-    let base = workspace.path().join("base-pack");
-    compile::build(&common::flat_options(source.clone(), base.clone())).expect("base build");
     let out = workspace.path().join("pack");
-    let mut options = common::flat_options(source, out.clone());
-    options.overlays = vec![overlay];
-    compile::build(&options).expect("overlay build");
+    compile::build(&common::flat_options(source), &out).expect("overlay build");
 
     assert_eq!(decode::<proto::Ability>(&base, "abilities").len(), 1);
     let abilities: Vec<proto::Ability> = decode(&out, "abilities");
@@ -342,8 +353,8 @@ effects:
         &fs::read_to_string(out.join("manifest.json")).expect("read manifest"),
     )
     .expect("parse manifest");
-    // The directory name, never the path it was read from: the fixture pack is
-    // compared byte for byte between a local rebuild and the CI one.
+    // The layer id, never the path it was read from: packs are compared byte
+    // for byte between a local rebuild and the CI one.
     assert_eq!(document.source.overlays, vec!["extended".to_string()]);
 }
 
@@ -369,7 +380,7 @@ level_max: 2
     )
     .expect("rewrite mob document");
 
-    let error = compile::build(&common::flat_options(source, workspace.path().join("pack")))
+    let error = compile::compile(&common::flat_options(source))
         .expect_err("build should reject a dangling faction reference");
     let message = format!("{error:#}");
     assert!(
@@ -383,10 +394,10 @@ fn a_source_tree_with_no_chargen_document_carries_no_chargen_table() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    let report = compile::build(&common::options(source, out.clone())).expect("build");
+    let report = compile::build(&common::options(source), &out).expect("build");
 
     assert!(
-        !report.tables.iter().any(|(name, _)| name == "chargen"),
+        !report.tables().iter().any(|(name, _)| name == "chargen"),
         "a tree with no chargen documents produced a chargen table"
     );
     assert!(!out.join("tables/chargen.sptbl").exists());
@@ -398,11 +409,11 @@ fn chargen_documents_compile_into_the_chargen_table() {
     let source = common::write_source(&workspace.path().join("src"));
     common::write_chargen(&source);
     let out = workspace.path().join("pack");
-    let report = compile::build(&common::options(source, out.clone())).expect("build");
+    let report = compile::build(&common::options(source), &out).expect("build");
 
     assert_eq!(
         report
-            .tables
+            .tables()
             .iter()
             .find(|(name, _)| name == "chargen")
             .map(|(_, rows)| *rows),
@@ -474,7 +485,7 @@ starting_level: 1
     )
     .expect("write broken chargen document");
 
-    let error = compile::build(&common::options(source, workspace.path().join("pack")))
+    let error = compile::compile(&common::options(source))
         .expect_err("build should reject a non-canonical zone reference");
     let message = format!("{error:#}");
     assert!(
@@ -497,11 +508,11 @@ fn a_source_tree_with_no_loot_documents_carries_no_item_or_loot_table() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     let out = workspace.path().join("pack");
-    let report = compile::build(&common::options(source, out.clone())).expect("build");
+    let report = compile::build(&common::options(source), &out).expect("build");
 
     for name in ["items", "loot-tables"] {
         assert!(
-            !report.tables.iter().any(|(table, _)| table == name),
+            !report.tables().iter().any(|(table, _)| table == name),
             "a tree with no loot documents produced a {name} table"
         );
         assert!(!out.join(format!("tables/{name}.sptbl")).exists());
@@ -514,7 +525,7 @@ fn loot_documents_compile_into_the_item_and_loot_tables() {
     let source = common::write_source(&workspace.path().join("src"));
     common::write_loot(&source);
     let out = workspace.path().join("pack");
-    compile::build(&common::options(source, out.clone())).expect("build");
+    compile::build(&common::options(source), &out).expect("build");
 
     let items: Vec<proto::Item> = decode(&out, "items");
     assert_eq!(
@@ -556,10 +567,10 @@ fn a_loot_tree_whose_chances_do_not_pair_with_its_entries_is_refused() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     common::write_loot(&source);
-    fs::write(
-        source.join("classic/loot/nested.yaml"),
+    common::rewrite_loot_table(
+        &source,
         r#"schema_version: 1
-id: loot.fixture.unpaired
+id: loot.fixture.nested
 source_type: demo.LootTableResource
 root:
   node: and
@@ -572,10 +583,9 @@ root:
       min_number: 2
       max_number: 2
 "#,
-    )
-    .expect("rewrite loot document");
+    );
 
-    let error = compile::build(&common::options(source, workspace.path().join("pack")))
+    let error = compile::compile(&common::options(source))
         .expect_err("build should reject an unpaired chances array");
     let message = format!("{error:#}");
     assert!(
@@ -589,10 +599,10 @@ fn a_loot_grant_of_an_item_the_pack_does_not_carry_is_refused() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     common::write_loot(&source);
-    fs::write(
-        source.join("classic/loot/nested.yaml"),
+    common::rewrite_loot_table(
+        &source,
         r#"schema_version: 1
-id: loot.fixture.dangling
+id: loot.fixture.nested
 source_type: demo.LootTableResource
 root:
   node: and
@@ -604,10 +614,9 @@ root:
       min_number: 1
       max_number: 1
 "#,
-    )
-    .expect("rewrite loot document");
+    );
 
-    let error = compile::build(&common::options(source, workspace.path().join("pack")))
+    let error = compile::compile(&common::options(source))
         .expect_err("build should reject a dangling item reference");
     let message = format!("{error:#}");
     assert!(
@@ -621,10 +630,10 @@ fn a_loot_leaf_whose_counts_are_inverted_is_refused() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     common::write_loot(&source);
-    fs::write(
-        source.join("classic/loot/nested.yaml"),
+    common::rewrite_loot_table(
+        &source,
         r#"schema_version: 1
-id: loot.fixture.inverted
+id: loot.fixture.nested
 source_type: demo.LootTableResource
 root:
   node: and
@@ -634,10 +643,9 @@ root:
       min_number: 9
       max_number: 2
 "#,
-    )
-    .expect("rewrite loot document");
+    );
 
-    let error = compile::build(&common::options(source, workspace.path().join("pack")))
+    let error = compile::compile(&common::options(source))
         .expect_err("build should reject inverted counts");
     let message = format!("{error:#}");
     assert!(

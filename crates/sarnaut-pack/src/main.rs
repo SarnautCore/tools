@@ -1,12 +1,14 @@
-//! `sarnaut-pack`: compile authored YAML into a runtime pack, and check one.
+//! `sarnaut-pack`: compile authored YAML into a runtime pack, check a source
+//! tree, and verify a built pack.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
-use sarnaut_pack::compile::{self, BuildOptions, PlayerSpawn};
+use sarnaut_pack::compile::{self, BuildOptions, CompiledPack, PlayerSpawn};
 use sarnaut_pack::manifest;
+use sarnaut_pack::refs;
 use sarnaut_pack::source::Layout;
 use sarnaut_pack::verify;
 
@@ -29,23 +31,28 @@ struct Cli {
 enum Command {
     /// Compile a source tree into a pack directory.
     Build(BuildArgs),
-    /// Check a pack's manifest digest against its table bytes.
+    /// Compile a source tree in memory and report what it found. Writes
+    /// nothing; intended for the data repository's CI.
+    Check(CheckArgs),
+    /// Check a built pack's manifest digest against its table bytes.
     Verify(VerifyArgs),
 }
 
+/// Everything both `build` and `check` need to read a source tree.
 #[derive(Args)]
-struct BuildArgs {
+struct SourceArgs {
     /// Source tree. Defaults to the demo dataset under `--fixture`.
     #[arg(long, value_name = "DIR")]
     src: Option<PathBuf>,
-    /// Flat directory of extra documents layered over `--src`. Repeatable;
-    /// layers apply in the order given. An overlay adds documents, it does not
-    /// patch them, so a duplicate id is an error rather than an override.
-    #[arg(long = "overlay", value_name = "DIR")]
-    overlays: Vec<PathBuf>,
-    /// Pack directory to write.
+    /// Overlay layer to apply, by the id `layers.yaml` gives it. Repeatable.
+    /// Layers always apply in `layers.yaml` order whatever order they are named
+    /// in. With none given, every layer whose `apply_by_default` is true
+    /// applies.
+    #[arg(long = "overlay", value_name = "LAYER")]
+    overlays: Vec<String>,
+    /// Directory holding `layers.yaml`. Defaults to `<src>/overlays`.
     #[arg(long, value_name = "DIR")]
-    out: PathBuf,
+    overlays_root: Option<PathBuf>,
     /// Build the golden fixture from `data-schemas/demo`: no private data, and
     /// a pinned `source.commit` so the vendored copy stays byte-stable.
     #[arg(long)]
@@ -58,15 +65,38 @@ struct BuildArgs {
     /// Keep the untyped `extra:` passthrough. Private-path artifact only.
     #[arg(long)]
     keep_extra: bool,
-    /// Player spawn as `x,y,z` or `x,y,z,yaw`.
+    /// Player spawn as `x,y,z` or `x,y,z,yaw`. Overrides the zone document.
     #[arg(long, value_name = "X,Y,Z[,YAW]")]
     player_spawn: Option<String>,
+    /// Let the later layer win when two overlay layers write one leaf. Every
+    /// conflict is listed in `build-report.json` either way.
+    #[arg(long)]
+    allow_overlay_conflicts: bool,
+    /// Fail on a localization key no locale document supplies, instead of
+    /// recording it as a coverage gap.
+    #[arg(long)]
+    require_locale: bool,
     /// Repository name recorded in `source.repo`.
     #[arg(long, value_name = "NAME")]
     source_repo: Option<String>,
     /// Commit recorded in `source.commit`. Defaults to the source repo's HEAD.
     #[arg(long, value_name = "SHA")]
     source_commit: Option<String>,
+}
+
+#[derive(Args)]
+struct BuildArgs {
+    #[command(flatten)]
+    source: SourceArgs,
+    /// Pack directory to write.
+    #[arg(long, value_name = "DIR")]
+    out: PathBuf,
+}
+
+#[derive(Args)]
+struct CheckArgs {
+    #[command(flatten)]
+    source: SourceArgs,
 }
 
 #[derive(Args)]
@@ -79,48 +109,99 @@ struct VerifyArgs {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Build(args) => run_build(args),
+        Command::Check(args) => run_check(args),
         Command::Verify(args) => run_verify(args),
     }
 }
 
-fn run_build(args: BuildArgs) -> Result<()> {
-    let source = match (&args.src, args.fixture) {
-        (Some(path), _) => path.clone(),
-        (None, true) => PathBuf::from(FIXTURE_SOURCE),
-        (None, false) => bail!("--src is required unless --fixture supplies the demo dataset"),
-    };
-    let options = BuildOptions {
-        source,
-        overlays: args.overlays,
-        out: args.out,
-        layout: if args.fixture {
-            Layout::Flat
-        } else {
-            Layout::Ruleset
-        },
-        ruleset: args.ruleset,
-        zone: args.zone,
-        keep_extra: args.keep_extra,
-        player_spawn: args.player_spawn.as_deref().map(parse_spawn).transpose()?,
-        source_repo: args
-            .source_repo
-            .unwrap_or_else(|| if args.fixture { FIXTURE_REPO } else { "data" }.to_string()),
-        source_commit: match (args.source_commit, args.fixture) {
-            (Some(commit), _) => Some(commit),
-            // A fixture rebuilt in CI must match the copy vendored in `server`,
-            // so it must not pick up whatever commit happens to be checked out.
-            (None, true) => Some(manifest::UNKNOWN_COMMIT.to_string()),
-            (None, false) => None,
-        },
-    };
+impl SourceArgs {
+    fn into_options(self) -> Result<BuildOptions> {
+        let source = match (&self.src, self.fixture) {
+            (Some(path), _) => path.clone(),
+            (None, true) => PathBuf::from(FIXTURE_SOURCE),
+            (None, false) => bail!("--src is required unless --fixture supplies the demo dataset"),
+        };
+        Ok(BuildOptions {
+            source,
+            overlays_root: self.overlays_root,
+            overlays: self.overlays,
+            layout: if self.fixture {
+                Layout::Flat
+            } else {
+                Layout::Ruleset
+            },
+            ruleset: self.ruleset,
+            zone: self.zone,
+            keep_extra: self.keep_extra,
+            player_spawn: self.player_spawn.as_deref().map(parse_spawn).transpose()?,
+            allow_overlay_conflicts: self.allow_overlay_conflicts,
+            require_locale: self.require_locale,
+            source_repo: self
+                .source_repo
+                .unwrap_or_else(|| if self.fixture { FIXTURE_REPO } else { "data" }.to_string()),
+            source_commit: match (self.source_commit, self.fixture) {
+                (Some(commit), _) => Some(commit),
+                // A fixture rebuilt in CI must match the copy vendored in
+                // `server`, so it must not pick up whatever commit happens to
+                // be checked out.
+                (None, true) => Some(manifest::UNKNOWN_COMMIT.to_string()),
+                (None, false) => None,
+            },
+        })
+    }
+}
 
-    let report = compile::build(&options).context("build pack")?;
-    println!("pack_id {}", report.pack_id);
-    println!("zone     {}", report.zone);
-    for (name, rows) in &report.tables {
+fn run_build(args: BuildArgs) -> Result<()> {
+    let options = args.source.into_options()?;
+    let pack = compile::build(&options, &args.out).context("build pack")?;
+    print_summary(&pack);
+    Ok(())
+}
+
+fn run_check(args: CheckArgs) -> Result<()> {
+    let options = args.source.into_options()?;
+    let pack = compile::compile(&options).context("check source tree")?;
+    print_summary(&pack);
+    Ok(())
+}
+
+/// One report shape for `build` and `check`, so a CI log and a local build read
+/// the same way.
+///
+/// A clean run still prints the external, unmodelled and locale-gap counts.
+/// They are the numbers that quietly grow when an extractor loses coverage, and
+/// a check that only printed failures would hide that.
+fn print_summary(pack: &CompiledPack) {
+    println!("pack_id  {}", pack.pack_id());
+    println!("zone     {}/{}", pack.manifest.ruleset, pack.zone());
+    if !pack.manifest.source.overlays.is_empty() {
+        println!("overlays {}", pack.manifest.source.overlays.join(", "));
+    }
+    for (name, rows) in pack.tables() {
         println!("table    {name} ({rows} rows)");
     }
-    Ok(())
+    let references = &pack.references;
+    println!(
+        "refs     {} resolved, 0 unresolved, {} external, {} unmodelled",
+        references.resolved,
+        references.external.len(),
+        references.unmodelled.len()
+    );
+    if !references.locale_gaps.is_empty() {
+        let by_namespace = refs::gaps_by_namespace(references)
+            .into_iter()
+            .map(|(namespace, count)| format!("{namespace} {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "locale   {} key(s) no locale document supplies ({by_namespace}); pass --require-locale to fail on them",
+            references.locale_gaps.len()
+        );
+    }
+    println!(
+        "notes    {} curated document(s)",
+        pack.report.curation_notes.len()
+    );
 }
 
 fn run_verify(args: VerifyArgs) -> Result<()> {

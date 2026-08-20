@@ -6,7 +6,10 @@
 
 pub mod compile;
 pub mod manifest;
+pub mod overlay;
 pub mod proto;
+pub mod refs;
+pub mod report;
 pub mod source;
 pub mod table;
 pub mod verify;

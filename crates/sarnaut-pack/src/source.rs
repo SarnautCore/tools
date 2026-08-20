@@ -1,18 +1,35 @@
-//! Reading the authored YAML: the placement and spawn-table documents the shard
-//! used to walk itself before ADR 0029 moved compilation into this crate.
+//! Reading the authored YAML: which files a build consumes, in what order the
+//! overlay layers apply, and what the merged documents deserialise into.
+//!
+//! Two things here are not obvious from the file list.
+//!
+//! **The item tree is never walked.** `data/classic/items/` holds 36,980
+//! documents across two dozen directories. A zone pack needs the handful of
+//! them its loot tables, chargen options and quest rewards actually name, so
+//! items are loaded on demand through `items/index.yaml` and the build's cost
+//! tracks the zone, not the catalogue.
+//!
+//! **Reachability selects loot and items, but only for a ruleset tree.** A flat
+//! hand-authored dataset is small and every document in it is deliberate, so it
+//! is compiled whole. A ruleset tree is a bulk extraction where "everything the
+//! extractor wrote" is not a useful answer to "what does this zone need".
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_yaml::Value;
+use walkdir::WalkDir;
+
+use crate::overlay::{self, Conflict, CurationNote, DocumentSet, Layer};
 
 /// Where the authored documents sit under the source root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layout {
-    /// The private `data` repo: `<src>/<ruleset>/zones/<zone>/spawns/{placements,tables}`.
+    /// The private `data` repo: `<src>/<ruleset>/…`, one zone directory per
+    /// zone plus the ruleset-global resource directories beside it.
     Ruleset,
     /// A flat directory of hand-authored documents, as in `data-schemas/demo`.
     Flat,
@@ -21,6 +38,7 @@ pub enum Layout {
 /// Every authored document the compiler consumes, already split by kind.
 #[derive(Debug, Default)]
 pub struct SourceTree {
+    pub zones: Vec<ZoneDocument>,
     pub placement_documents: Vec<PlacementDocument>,
     pub tables: Vec<SpawnTableDocument>,
     pub mobs: Vec<MobDocument>,
@@ -30,17 +48,133 @@ pub struct SourceTree {
     pub chargen_options: Vec<ChargenDocument>,
     pub items: Vec<ItemDocument>,
     pub loot_tables: Vec<LootTableDocument>,
+    pub quests: Vec<QuestDocument>,
+    pub routes: Vec<RouteDocument>,
+    pub locales: Vec<LocaleDocument>,
+    pub level_curves: Vec<LevelCurveDocument>,
+    /// Which overlay layers were applied, in `layers.yaml` order.
+    pub layers: Vec<AppliedLayer>,
+    /// Why each curated document exists. Aggregated into `build-report.json`
+    /// and never written into table bytes (ADR 0029).
+    pub notes: Vec<CurationNote>,
+    /// Leaves two overlay layers both wrote.
+    pub conflicts: Vec<Conflict>,
+    /// Ids an overlay removed outright.
+    pub deleted: Vec<String>,
+    /// Loot tables the source tree carries that no mob in this zone reaches.
+    pub unreachable_loot_tables: usize,
+    /// How many item documents were opened out of the index.
+    pub items_loaded_from_index: usize,
 }
 
-/// The localization keys a document carries. Only `name` reaches most pack
-/// rows; chargen options also carry `description`, and the rest are read by the
-/// client from the locale tables (ADR 0007).
-#[derive(Debug, Default, Deserialize)]
+/// One overlay layer that contributed to this build.
+#[derive(Clone, Debug)]
+pub struct AppliedLayer {
+    pub id: String,
+    pub description: String,
+    pub documents: usize,
+}
+
+/// Where an extracted document came from. Only the path is read, and only to
+/// resolve a relative localization key against the directory it was authored
+/// in. A hand-authored document carries none, and its keys stand alone.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Provenance {
+    #[serde(default)]
+    pub path: String,
+}
+
+/// The localization keys a document carries (ADR 0007).
+///
+/// The field set is the union of the `loc_ref` shapes `data-schemas` declares.
+/// It is spelled out rather than read as a free map so that a misspelled key is
+/// a schema error in the data repository rather than a string that silently
+/// reaches nothing.
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct LocRef {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub goal: Option<String>,
+    #[serde(default)]
+    pub start: Option<String>,
+    #[serde(default)]
+    pub check: Option<String>,
+    #[serde(default)]
+    pub finish: Option<String>,
+}
+
+impl LocRef {
+    /// Every key this document declares, as `(field, authored value)`.
+    pub fn entries(&self) -> Vec<(&'static str, &str)> {
+        [
+            ("name", self.name.as_deref()),
+            ("description", self.description.as_deref()),
+            ("title", self.title.as_deref()),
+            ("goal", self.goal.as_deref()),
+            ("start", self.start.as_deref()),
+            ("check", self.check.as_deref()),
+            ("finish", self.finish.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(field, value)| value.map(|value| (field, value)))
+        .collect()
+    }
+}
+
+/// One zone: the document every zone-scoped `zone:` field points at.
+#[derive(Debug, Deserialize)]
+pub struct ZoneDocument {
+    pub id: String,
+    #[serde(default)]
+    pub loc_ref: LocRef,
+    #[serde(default)]
+    pub maps: Vec<String>,
+    #[serde(default)]
+    pub player_spawn: Option<ZonePlayerSpawn>,
+    #[serde(default)]
+    pub bounds: Option<Bounds>,
+    #[serde(default)]
+    pub level_range: Option<LevelRange>,
+    #[serde(default)]
+    pub instance: Option<ZoneInstance>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source", default)]
+    pub source: Provenance,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ZonePlayerSpawn {
+    #[serde(default)]
+    pub map: Option<String>,
+    pub position: Position,
+    #[serde(default)]
+    pub heading: f32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct Bounds {
+    pub min: Position,
+    pub max: Position,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct LevelRange {
+    pub min: u32,
+    pub max: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct ZoneInstance {
+    #[serde(default)]
+    pub instanced: bool,
+    #[serde(default)]
+    pub max_players: u32,
 }
 
 /// One creature record: the combat inputs of `mechanics/combat.md` section 4.
@@ -52,6 +186,8 @@ pub struct MobDocument {
     pub loc_ref: LocRef,
     #[serde(default)]
     pub mob_kind: Option<ObjectRef>,
+    #[serde(default)]
+    pub quality: Option<ObjectRef>,
     #[serde(default)]
     pub faction: Option<ObjectRef>,
     #[serde(default)]
@@ -68,17 +204,83 @@ pub struct MobDocument {
     pub leash_radius_m: Option<f32>,
     #[serde(default)]
     pub abilities: Vec<ObjectRef>,
+    /// Quests this NPC offers. The quest document names its own starter and
+    /// finisher too; both directions are authored, and the compiler checks
+    /// both rather than trusting one.
+    #[serde(default)]
+    pub quests: Vec<ObjectRef>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source", default)]
+    pub source: Provenance,
+}
+
+/// Which of the three creature-taxonomy record types a document is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaxonomyKind {
+    Kind,
+    Class,
+    Quality,
+}
+
+/// A `MobKind`, `MobClass` or `MobQuality` document.
+///
+/// Every multiplier is read as the record's own declared value. The prototype
+/// link is carried, not walked: `mechanics/combat.md` section 7.1 defers the
+/// resolution order of the chain, and half a walk produces a number nothing can
+/// explain.
+#[derive(Debug, Deserialize)]
+pub struct MobKindDocument {
+    pub id: String,
+    #[serde(skip)]
+    pub taxonomy: Option<TaxonomyKind>,
+    #[serde(default)]
+    pub loc_ref: LocRef,
+    #[serde(default)]
+    pub prototype: Option<ObjectRef>,
+    #[serde(default)]
+    pub mob_class: Option<ObjectRef>,
+    #[serde(default)]
+    pub quality: Option<ObjectRef>,
+    #[serde(default)]
+    pub hp_mod: Option<f32>,
+    #[serde(default)]
+    pub dps_mod: Option<f32>,
+    #[serde(default)]
+    pub exp_mod: Option<f32>,
+    #[serde(default)]
+    pub mana_mod: Option<f32>,
+    #[serde(default)]
+    pub loot_mod: Option<f32>,
+    #[serde(default)]
+    pub speed: Option<f32>,
+    #[serde(default)]
+    pub rank: Option<u32>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source", default)]
+    pub source: Provenance,
+}
+
+/// The curated per-level base HP/DPS/XP table (`mechanics/combat.md` §7.1).
+#[derive(Debug, Deserialize)]
+pub struct LevelCurveDocument {
+    pub id: String,
+    pub ruleset: String,
+    #[serde(default)]
+    pub points: Vec<LevelCurvePointDocument>,
     #[serde(default)]
     pub extra: BTreeMap<String, Value>,
 }
 
-/// A `MobKind`, `MobClass` or `MobQuality` document. Only `hp_mod` is read:
-/// `mechanics/combat.md` section 7.1 defers the rest of the multiplier chain.
-#[derive(Debug, Deserialize)]
-pub struct MobKindDocument {
-    pub id: String,
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct LevelCurvePointDocument {
+    pub level: u32,
+    pub base_hp: i32,
     #[serde(default)]
-    pub hp_mod: Option<f32>,
+    pub base_dps: f32,
+    #[serde(default)]
+    pub base_experience: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +302,8 @@ pub struct AbilityDocument {
     pub effects: Vec<AbilityEffectDocument>,
     #[serde(default)]
     pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source", default)]
+    pub source: Provenance,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +332,8 @@ pub struct FactionDocument {
     pub relations: Vec<FactionRelationDocument>,
     #[serde(default)]
     pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source", default)]
+    pub source: Provenance,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,6 +365,8 @@ pub struct ItemDocument {
     pub vendor_price: Option<VendorPriceDocument>,
     #[serde(default)]
     pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source", default)]
+    pub source: Provenance,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -197,6 +405,135 @@ pub struct LootNodeDocument {
     pub min_number: Option<i32>,
     #[serde(default)]
     pub max_number: Option<i32>,
+}
+
+/// One quest definition (`mechanics/quests.md` section 4).
+#[derive(Debug, Deserialize)]
+pub struct QuestDocument {
+    pub id: String,
+    pub zone: String,
+    #[serde(default)]
+    pub loc_ref: LocRef,
+    #[serde(default)]
+    pub level: Option<u32>,
+    #[serde(default)]
+    pub required_level: Option<u32>,
+    #[serde(default)]
+    pub quest_type: Option<String>,
+    #[serde(default)]
+    pub starter: Option<ObjectRef>,
+    #[serde(default)]
+    pub finisher: Option<ObjectRef>,
+    #[serde(default)]
+    pub prerequisites: Vec<QuestPrerequisiteDocument>,
+    #[serde(default)]
+    pub objectives: Vec<QuestObjectiveDocument>,
+    #[serde(default)]
+    pub rewards: QuestRewardsDocument,
+    #[serde(default)]
+    pub flags: BTreeMap<String, bool>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source", default)]
+    pub source: Provenance,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QuestPrerequisiteDocument {
+    pub quest: ObjectRef,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QuestObjectiveDocument {
+    pub kind: String,
+    #[serde(default)]
+    pub loc_ref: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i32>,
+    #[serde(default)]
+    pub internal: bool,
+    #[serde(default)]
+    pub show_count: bool,
+    #[serde(default)]
+    pub targets: Vec<ObjectRef>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct QuestRewardsDocument {
+    #[serde(default)]
+    pub experience: i64,
+    #[serde(default)]
+    pub money: i64,
+    #[serde(default)]
+    pub honor: i64,
+    #[serde(default)]
+    pub mandatory_items: Vec<QuestRewardItemDocument>,
+    #[serde(default)]
+    pub alternative_items: Vec<QuestRewardItemDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QuestRewardItemDocument {
+    pub item: ObjectRef,
+    #[serde(default)]
+    pub count: i32,
+    #[serde(default)]
+    pub hidden: bool,
+}
+
+/// One patrol route a placement can follow.
+#[derive(Debug, Deserialize)]
+pub struct RouteDocument {
+    pub id: String,
+    pub zone: String,
+    #[serde(default)]
+    pub map: Option<String>,
+    #[serde(default)]
+    pub points: Vec<RoutePointDocument>,
+    #[serde(default)]
+    pub links: Vec<RouteLinkDocument>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct RoutePointDocument {
+    pub index: u32,
+    pub position: Position,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RouteLinkDocument {
+    pub from: u32,
+    pub to: u32,
+    #[serde(default)]
+    pub weight: f32,
+    #[serde(default)]
+    pub movement: Option<String>,
+    #[serde(default)]
+    pub flying: bool,
+}
+
+/// Every string of one language (ADR 0007).
+#[derive(Debug, Deserialize)]
+pub struct LocaleDocument {
+    pub id: String,
+    pub language: String,
+    #[serde(default)]
+    pub entries: Vec<LocaleEntryDocument>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LocaleEntryDocument {
+    pub key: String,
+    #[serde(default)]
+    pub text: String,
 }
 
 /// The respawn window an authored placement carries, in milliseconds.
@@ -264,8 +601,8 @@ pub struct SourceTableEntry {
 /// One character-creation option (ADR 0032).
 ///
 /// A chargen document carries no `kind`, so it is recognised by its canonical
-/// `chargen.` id prefix. It is also the only global document type the compiler
-/// reads today: it names the zone it spawns into rather than belonging to one.
+/// `chargen.` id prefix. It names the zone it spawns into rather than belonging
+/// to one.
 #[derive(Debug, Deserialize)]
 pub struct ChargenDocument {
     pub id: String,
@@ -275,7 +612,7 @@ pub struct ChargenDocument {
     pub faction: String,
     pub enabled: bool,
     #[serde(default)]
-    pub loc_ref: Option<LocRef>,
+    pub loc_ref: LocRef,
     pub visual_ref: String,
     pub spawn: ChargenSpawn,
     pub starting_level: u32,
@@ -289,6 +626,8 @@ pub struct ChargenDocument {
     pub starting_quests: Vec<String>,
     #[serde(default)]
     pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source", default)]
+    pub source: Provenance,
 }
 
 #[derive(Debug, Deserialize)]
@@ -322,6 +661,12 @@ pub struct ObjectRef {
     pub id: Option<String>,
 }
 
+impl ObjectRef {
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 pub struct Position {
     pub x: f32,
@@ -335,119 +680,421 @@ pub struct Orientation {
     pub yaw: f32,
 }
 
-/// Loads every document the compiler understands from `root`, then from each
-/// directory in `overlays` in order.
-///
-/// `zone` is required for [`Layout::Ruleset`], which addresses one zone
-/// directory; [`Layout::Flat`] reads whatever documents the directory holds.
-///
-/// An overlay is always a flat directory of extra documents. It adds; it does
-/// not patch. Two documents with the same id are rejected wherever they came
-/// from, because a silent last-one-wins would make the compiled pack depend on
-/// argument order in a way nothing checks.
-pub fn load(
-    root: &Path,
-    overlays: &[PathBuf],
-    layout: Layout,
-    ruleset: &str,
-    zone: Option<&str>,
-) -> Result<SourceTree> {
-    let mut files = match layout {
-        Layout::Ruleset => {
-            let zone = zone.ok_or_else(|| {
-                anyhow!("a zone slug is required when reading a ruleset source tree")
-            })?;
-            let spawns = root.join(ruleset).join("zones").join(zone).join("spawns");
-            let mut files = yaml_files(&spawns.join("placements"))?;
-            files.extend(yaml_files(&spawns.join("tables"))?);
-            // Mob records are per-zone in the authored tree. The directory is
-            // optional because a zone can be all placements and tables, and a
-            // pack with no mob rows is a legal, if unplayable, pack. Global
-            // resources — abilities, factions — have no home in the ruleset
-            // tree yet and arrive through `--overlay` until the extractor
-            // writes them.
-            files.extend(optional_yaml_files(&spawns.join("mobs"))?);
-            // Chargen options are ruleset-global rather than zone-scoped
-            // (ADR 0032), so they sit beside the zones directory. A tree that
-            // has none still builds: the pack simply carries no chargen table.
-            files.extend(optional_yaml_files(&root.join(ruleset).join("chargen"))?);
-            // Items and loot tables are global for the same reason: an item is
-            // not owned by the zone whose mob happens to drop it.
-            files.extend(optional_yaml_files(&root.join(ruleset).join("items"))?);
-            files.extend(optional_yaml_files(&root.join(ruleset).join("loot"))?);
-            files
+/// What a build reads from where.
+#[derive(Debug)]
+pub struct LoadOptions<'a> {
+    pub root: &'a Path,
+    /// Directory holding `layers.yaml` and one directory per layer. Defaults to
+    /// `<root>/overlays`.
+    pub overlays_root: PathBuf,
+    /// Layer ids to apply. Empty means every default-on layer.
+    pub selected_layers: &'a [String],
+    pub layout: Layout,
+    pub ruleset: &'a str,
+    pub zone: Option<&'a str>,
+}
+
+impl<'a> LoadOptions<'a> {
+    pub fn new(root: &'a Path, layout: Layout, ruleset: &'a str, zone: Option<&'a str>) -> Self {
+        Self {
+            root,
+            overlays_root: root.join("overlays"),
+            selected_layers: &[],
+            layout,
+            ruleset,
+            zone,
         }
-        Layout::Flat => yaml_files(root)?,
-    };
-    for overlay in overlays {
-        files.extend(yaml_files(overlay)?);
+    }
+}
+
+/// The index that makes the item catalogue addressable without walking it.
+const ITEM_INDEX_FILE_NAME: &str = "index.yaml";
+
+/// The `id -> relative path` map that makes the item catalogue addressable
+/// without walking it.
+#[derive(Debug, Default, Deserialize)]
+struct ItemIndexDocument {
+    #[serde(default)]
+    entries: BTreeMap<String, String>,
+}
+
+/// Loads every document the compiler understands, merges the overlay layers
+/// over the base, and demand-loads the items the result reaches.
+pub fn load(options: &LoadOptions<'_>) -> Result<SourceTree> {
+    let layers = overlay::select_layers(&options.overlays_root, options.selected_layers)?;
+
+    let mut documents = DocumentSet::default();
+    for path in base_files(options)? {
+        let value = read_yaml(&path)?;
+        documents.insert_base(&path, value)?;
     }
 
-    let mut tree = SourceTree::default();
-    for path in files {
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("read authored document {}", path.display()))?;
-        let document: Value = serde_yaml::from_str(&text)
-            .with_context(|| format!("parse authored document {}", path.display()))?;
-        read_document(&mut tree, document, &path)?;
+    // Overlay documents are read once and applied in `layers.yaml` order.
+    // Item patches are held back: an item's base document is only opened once
+    // the reachable set is known, and a patch applied before its base would
+    // create a document out of the patch alone.
+    let mut applied = Vec::new();
+    let mut item_patches: Vec<(String, PathBuf, Value)> = Vec::new();
+    for layer in &layers {
+        let files = layer_files(layer)?;
+        let mut count = 0;
+        for path in files {
+            let value = read_yaml(&path)?;
+            let id = value.get("id").and_then(Value::as_str).unwrap_or_default();
+            if options.layout == Layout::Ruleset && id.starts_with("item.") {
+                item_patches.push((layer.id.clone(), path, value));
+            } else {
+                documents.apply_overlay(&layer.id, &path, value)?;
+            }
+            count += 1;
+        }
+        applied.push(AppliedLayer {
+            id: layer.id.clone(),
+            description: layer.description.clone(),
+            documents: count,
+        });
+    }
+
+    let mut tree = SourceTree {
+        layers: applied,
+        ..SourceTree::default()
+    };
+    let mut loot_documents: BTreeMap<String, LootTableDocument> = BTreeMap::new();
+    let mut item_values: BTreeMap<String, Value> = BTreeMap::new();
+    for document in documents.iter() {
+        let mut value = clone_without_patch_keys(&document.value);
+        let what = document_kind(&value, &document.id);
+        // A flat dataset is compiled whole; a ruleset tree holds them back for
+        // the reachability pass below.
+        match (what.as_str(), options.layout) {
+            ("item", Layout::Ruleset) => {
+                item_values.insert(document.id.clone(), value);
+            }
+            ("loot", Layout::Ruleset) => {
+                let parsed: LootTableDocument = from_value(&mut value, "loot table", document)?;
+                loot_documents.insert(document.id.clone(), parsed);
+            }
+            _ => file_document(&mut tree, value, &what, document)?,
+        }
+    }
+    tree.notes = documents.notes;
+    tree.conflicts = documents.conflicts;
+    tree.deleted = documents.deleted;
+
+    if options.layout == Layout::Ruleset {
+        // A ruleset tree holds one document per zone in `zones/`. A pack covers
+        // exactly one zone (ADR 0029), so the others are not this build's.
+        if let Some(zone) = options.zone {
+            let wanted = format!("zone.{zone}");
+            tree.zones.retain(|document| document.id == wanted);
+        }
+        select_reachable(
+            options,
+            &mut tree,
+            loot_documents,
+            item_values,
+            &item_patches,
+        )?;
     }
 
     if tree.placement_documents.is_empty() {
-        bail!("{} holds no placement documents", root.display());
+        bail!("{} holds no placement documents", options.root.display());
     }
     Ok(tree)
 }
 
-/// Files a document into the tree.
+/// Chooses the loot tables this zone's mobs reach, then opens exactly the item
+/// documents those tables — and the zone's chargen options and quests — name.
+fn select_reachable(
+    options: &LoadOptions<'_>,
+    tree: &mut SourceTree,
+    loot_documents: BTreeMap<String, LootTableDocument>,
+    item_values: BTreeMap<String, Value>,
+    item_patches: &[(String, PathBuf, Value)],
+) -> Result<()> {
+    let mut wanted_loot: BTreeSet<String> = BTreeSet::new();
+    for mob in &tree.mobs {
+        if let Some(id) = mob.loot_table.as_ref().and_then(ObjectRef::id) {
+            wanted_loot.insert(id.to_string());
+        }
+    }
+    // A loot table an overlay authored is curated on purpose, so it ships even
+    // when nothing references it yet.
+    for note in &tree.notes {
+        if note.layer != overlay::BASE_LAYER && note.document_id.starts_with("loot.") {
+            wanted_loot.insert(note.document_id.clone());
+        }
+    }
+
+    let total_loot = loot_documents.len();
+    let reachable: BTreeMap<String, LootTableDocument> = loot_documents
+        .into_iter()
+        .filter(|(id, _)| wanted_loot.contains(id))
+        .collect();
+    tree.unreachable_loot_tables = total_loot - reachable.len();
+
+    let mut wanted_items: BTreeSet<String> = BTreeSet::new();
+    for table in reachable.values() {
+        collect_loot_items(&table.root, &mut wanted_items);
+    }
+    for option in &tree.chargen_options {
+        for entry in &option.starting_loadout {
+            wanted_items.insert(entry.item_id.clone());
+        }
+    }
+    for quest in &tree.quests {
+        for reward in quest
+            .rewards
+            .mandatory_items
+            .iter()
+            .chain(&quest.rewards.alternative_items)
+        {
+            if let Some(id) = reward.item.id() {
+                wanted_items.insert(id.to_string());
+            }
+        }
+        for objective in &quest.objectives {
+            for target in &objective.targets {
+                if let Some(id) = target.id().filter(|id| id.starts_with("item.")) {
+                    wanted_items.insert(id.to_string());
+                }
+            }
+        }
+    }
+    // An item document that only an overlay supplies is content in its own
+    // right, not a patch, so it ships whether or not anything reaches it.
+    for (_, _, patch) in item_patches {
+        if let Some(id) = patch.get("id").and_then(Value::as_str) {
+            wanted_items.insert(id.to_string());
+        }
+    }
+
+    let index = read_item_index(options)?;
+    let mut item_set = DocumentSet::default();
+    let mut opened = 0usize;
+    for id in &wanted_items {
+        if let Some(value) = item_values.get(id) {
+            item_set.insert_base(Path::new("<merged>"), value.clone())?;
+            continue;
+        }
+        let Some(relative) = index.get(id) else {
+            // Not an error here: the reference checker owns dangling
+            // references, and it names the document that asked for this id.
+            continue;
+        };
+        let path = options.root.join(options.ruleset).join(relative);
+        let value = read_yaml(&path)?;
+        item_set.insert_base(&path, value)?;
+        opened += 1;
+    }
+    for (layer, path, patch) in item_patches {
+        item_set.apply_overlay(layer, path, patch.clone())?;
+    }
+    tree.notes.extend(item_set.notes.iter().cloned());
+    tree.conflicts.extend(item_set.conflicts.iter().cloned());
+
+    tree.items_loaded_from_index = opened;
+    for document in item_set.iter() {
+        let mut value = clone_without_patch_keys(&document.value);
+        tree.items.push(from_value(&mut value, "item", document)?);
+    }
+    tree.loot_tables = reachable.into_values().collect();
+    Ok(())
+}
+
+fn collect_loot_items(node: &LootNodeDocument, into: &mut BTreeSet<String>) {
+    if let Some(id) = node.item.as_ref().and_then(ObjectRef::id) {
+        into.insert(id.to_string());
+    }
+    for child in &node.entries {
+        collect_loot_items(child, into);
+    }
+}
+
+fn read_item_index(options: &LoadOptions<'_>) -> Result<BTreeMap<String, String>> {
+    let path = options
+        .root
+        .join(options.ruleset)
+        .join("items")
+        .join(ITEM_INDEX_FILE_NAME);
+    if !path.is_file() {
+        return Ok(BTreeMap::new());
+    }
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("read item index {}", path.display()))?;
+    let document: ItemIndexDocument = serde_yaml::from_str(&text)
+        .with_context(|| format!("parse item index {}", path.display()))?;
+    Ok(document.entries)
+}
+
+/// Turns a merged document into a typed one, naming the layer and file the
+/// merged form came from when it does not fit.
+fn from_value<T: serde::de::DeserializeOwned>(
+    value: &mut Value,
+    label: &str,
+    document: &overlay::MergedDocument,
+) -> Result<T> {
+    let taken = std::mem::replace(value, Value::Null);
+    serde_yaml::from_value(taken).with_context(|| {
+        format!(
+            "read {label} {} (layer {}, {})",
+            document.id,
+            document.origin_layer,
+            document.origin_path.display()
+        )
+    })
+}
+
+/// Files a merged document into the tree by kind.
 ///
-/// Spawn documents declare their own `kind`. Abilities and factions are global
-/// resources with no `kind` field, so they are recognised by the first segment
-/// of their canonical id, which ADR 0007 makes the document's type tag.
-fn read_document(tree: &mut SourceTree, document: Value, path: &Path) -> Result<()> {
-    let kind = document.get("kind").and_then(Value::as_str).unwrap_or("");
-    let id = document.get("id").and_then(Value::as_str).unwrap_or("");
-    let prefix = id.split('.').next().unwrap_or("");
-    let what = if kind.is_empty() { prefix } else { kind };
-    let context = |label: &str| format!("read {label} from {}", path.display());
+/// Spawn documents declare their own `kind`. Global resources have no `kind`
+/// field, so they are recognised by the first segment of their canonical id,
+/// which ADR 0007 makes the document's type tag.
+fn document_kind(value: &Value, id: &str) -> String {
+    let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
+    if kind.is_empty() {
+        id.split('.').next().unwrap_or("")
+    } else {
+        kind
+    }
+    .to_string()
+}
+
+fn file_document(
+    tree: &mut SourceTree,
+    mut value: Value,
+    what: &str,
+    document: &overlay::MergedDocument,
+) -> Result<()> {
     match what {
-        "placements" => tree
-            .placement_documents
-            .push(serde_yaml::from_value(document).with_context(|| context("placements"))?),
+        "placements" => {
+            tree.placement_documents
+                .push(from_value(&mut value, "placements", document)?)
+        }
         "table" => tree
             .tables
-            .push(serde_yaml::from_value(document).with_context(|| context("spawn table"))?),
-        "mob" => tree
-            .mobs
-            .push(serde_yaml::from_value(document).with_context(|| context("mob"))?),
-        // The creature taxonomy is three record types in one schema. Only the
-        // ones that can carry `hp_mod` are read, and only for that field.
-        "mobkind" | "mobquality" => tree
-            .mob_kinds
-            .push(serde_yaml::from_value(document).with_context(|| context("mob kind"))?),
+            .push(from_value(&mut value, "spawn table", document)?),
+        "mob" => tree.mobs.push(from_value(&mut value, "mob", document)?),
+        "mobkind" | "mobclass" | "mobquality" => {
+            let mut parsed: MobKindDocument = from_value(&mut value, "mob kind", document)?;
+            parsed.taxonomy = Some(match what {
+                "mobclass" => TaxonomyKind::Class,
+                "mobquality" => TaxonomyKind::Quality,
+                _ => TaxonomyKind::Kind,
+            });
+            tree.mob_kinds.push(parsed);
+        }
         "ability" => tree
             .abilities
-            .push(serde_yaml::from_value(document).with_context(|| context("ability"))?),
+            .push(from_value(&mut value, "ability", document)?),
         "faction" => tree
             .factions
-            .push(serde_yaml::from_value(document).with_context(|| context("faction"))?),
+            .push(from_value(&mut value, "faction", document)?),
         "chargen" => tree
             .chargen_options
-            .push(serde_yaml::from_value(document).with_context(|| context("chargen option"))?),
-        "item" => tree
-            .items
-            .push(serde_yaml::from_value(document).with_context(|| context("item"))?),
+            .push(from_value(&mut value, "chargen option", document)?),
+        "quest" => tree.quests.push(from_value(&mut value, "quest", document)?),
+        "route" => tree.routes.push(from_value(&mut value, "route", document)?),
+        "locale" => tree
+            .locales
+            .push(from_value(&mut value, "locale", document)?),
+        "levelcurve" => tree
+            .level_curves
+            .push(from_value(&mut value, "level curve", document)?),
+        "zone" => tree.zones.push(from_value(&mut value, "zone", document)?),
+        "item" => tree.items.push(from_value(&mut value, "item", document)?),
         "loot" => tree
             .loot_tables
-            .push(serde_yaml::from_value(document).with_context(|| context("loot table"))?),
-        // Quests, routes and locales carry no runtime rows here. A pack that
-        // needs them gets a table of its own rather than a guess in this match.
+            .push(from_value(&mut value, "loot table", document)?),
+        // An id whose first segment names no document type this compiler
+        // knows. The item index is the only such file the ruleset tree holds,
+        // and it is read separately.
         _ => {}
     }
     Ok(())
 }
 
-/// Like [`yaml_files`], but an absent directory yields nothing instead of an
-/// error.
+fn clone_without_patch_keys(value: &Value) -> Value {
+    let mut copy = value.clone();
+    overlay::strip_patch_keys(&mut copy);
+    copy
+}
+
+fn read_yaml(path: &Path) -> Result<Value> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("read authored document {}", path.display()))?;
+    serde_yaml::from_str(&text)
+        .with_context(|| format!("parse authored document {}", path.display()))
+}
+
+/// The base-layer files a build reads, in a stable order.
+fn base_files(options: &LoadOptions<'_>) -> Result<Vec<PathBuf>> {
+    match options.layout {
+        Layout::Flat => yaml_files(options.root),
+        Layout::Ruleset => {
+            let zone = options.zone.ok_or_else(|| {
+                anyhow!("a zone slug is required when reading a ruleset source tree")
+            })?;
+            let ruleset = options.root.join(options.ruleset);
+            let zone_root = ruleset.join("zones").join(zone);
+            let spawns = zone_root.join("spawns");
+
+            let mut files = yaml_files(&spawns.join("placements"))?;
+            files.extend(yaml_files(&spawns.join("tables"))?);
+            // Mob records are per-zone in the authored tree. The directory is
+            // optional because a zone can be all placements and tables, and a
+            // pack with no mob rows is a legal, if unplayable, pack.
+            files.extend(optional_yaml_files(&spawns.join("mobs"))?);
+            files.extend(optional_yaml_files(&zone_root.join("quests"))?);
+            files.extend(optional_yaml_files(&zone_root.join("routes"))?);
+            // The zone's own document sits beside its directory when the
+            // extractor has written one.
+            files.extend(optional_yaml_files(&ruleset.join("zones"))?);
+
+            // Ruleset-global resources. None of them belongs to a zone: an
+            // item is not owned by the zone whose mob happens to drop it.
+            for global in [
+                "chargen",
+                "loot",
+                "factions",
+                "mobkinds",
+                "mobclasses",
+                "mobqualities",
+                "abilities",
+                "levelcurves",
+            ] {
+                files.extend(optional_yaml_files(&ruleset.join(global))?);
+            }
+            // Locale packs are nested one directory per language.
+            files.extend(optional_yaml_tree(&ruleset.join("locale"))?);
+            // Items directly under `items/` only. The catalogue proper lives in
+            // subdirectories and is reached through `index.yaml`, which is a
+            // build input rather than a content document and is read once, by
+            // `read_item_index`.
+            let mut item_files = optional_yaml_files(&ruleset.join("items"))?;
+            item_files.retain(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_none_or(|name| name != ITEM_INDEX_FILE_NAME)
+            });
+            files.extend(item_files);
+            Ok(files)
+        }
+    }
+}
+
+/// Every `*.yaml` under a layer directory, recursively: a layer mirrors
+/// whatever shape the tree it patches has.
+fn layer_files(layer: &Layer) -> Result<Vec<PathBuf>> {
+    let mut files = yaml_tree(&layer.directory)?;
+    files.retain(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_none_or(|name| name != overlay::LAYERS_FILE_NAME)
+    });
+    Ok(files)
+}
+
 fn optional_yaml_files(directory: &Path) -> Result<Vec<PathBuf>> {
     if !directory.is_dir() {
         return Ok(Vec::new());
@@ -455,8 +1102,15 @@ fn optional_yaml_files(directory: &Path) -> Result<Vec<PathBuf>> {
     yaml_files(directory)
 }
 
-/// Lists `*.yaml` files directly inside `directory`, sorted by file name so that
-/// two runs on the same tree see the same order.
+fn optional_yaml_tree(directory: &Path) -> Result<Vec<PathBuf>> {
+    if !directory.is_dir() {
+        return Ok(Vec::new());
+    }
+    yaml_tree(directory)
+}
+
+/// Lists `*.yaml` files directly inside `directory`, sorted by path so that two
+/// runs on the same tree see the same order.
 fn yaml_files(directory: &Path) -> Result<Vec<PathBuf>> {
     let entries = fs::read_dir(directory)
         .with_context(|| format!("read source directory {}", directory.display()))?;
@@ -464,16 +1118,30 @@ fn yaml_files(directory: &Path) -> Result<Vec<PathBuf>> {
     for entry in entries {
         let entry = entry.with_context(|| format!("list {}", directory.display()))?;
         let path = entry.path();
-        if path.is_file()
-            && path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("yaml"))
-        {
+        if path.is_file() && is_yaml(&path) {
             files.push(path);
         }
     }
     files.sort();
     Ok(files)
+}
+
+/// Like [`yaml_files`], but recursive.
+fn yaml_tree(directory: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in WalkDir::new(directory).sort_by_file_name() {
+        let entry = entry.with_context(|| format!("walk {}", directory.display()))?;
+        if entry.file_type().is_file() && is_yaml(entry.path()) {
+            files.push(entry.into_path());
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn is_yaml(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("yaml"))
 }
 
 /// Converts an authored YAML value into the JSON text stored in a `keep_extra`
