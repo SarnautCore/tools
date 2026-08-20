@@ -92,6 +92,44 @@ sarnaut-extract zone `
 
 Add `--dry-run` to parse, map, hash, and validate without writing YAML.
 
+### Gameplay subcommands
+
+`mobkinds`, `loot`, and `locale` are scoped to one zone and pull in only what that
+zone's mobs reach, rather than sweeping a whole directory.
+
+```powershell
+# MobKind prototype chains, plus the classes, qualities and faction closure.
+sarnaut-extract mobkinds --name InstLeague1 `
+  --src E:\allods\servers-clean\1.1.02.0\game\data `
+  --out E:\SarnautCore\data\classic --validate
+
+# Loot tables reachable from those mob kinds, plus classic/items/index.yaml.
+sarnaut-extract loot --name InstLeague1 `
+  --src E:\allods\servers-clean\1.1.02.0\game\data `
+  --out E:\SarnautCore\data\classic --validate
+
+# loc_ref strings, gap-filled from a second source root.
+sarnaut-extract locale --name InstLeague1 --language ru `
+  --src E:\allods\servers-clean\1.1.02.0\game\data `
+  --supplemental-src E:\allods\servers\1.1\game\data `
+  --out E:\SarnautCore\data\classic --validate
+```
+
+Three things about these are worth knowing before reading their output:
+
+- A `MobKind` file lists only what differs from its `Header/Prototype`, so the
+  emitted multipliers are the merged chain and `_source.prototype_chain` records
+  which documents produced them. The base HP/DPS curve those multipliers scale is not
+  in the source tree; every mob kind carries an `extra.level_curve_gap` note pointing
+  at `docs/specs/mechanics/combat.md` §7.1, which owns the curated replacement.
+- Under `--validate`, `loot` exits non-zero listing any item reference that resolves
+  to no item document, and `locale` exits non-zero when the unresolved `loc_ref` rate
+  exceeds `--max-unresolved-rate` (5% by default).
+- The reference tree ships about 705 `.txt` payloads; `servers/1.1` ships tens of
+  thousands. Each locale entry records the root it came from, and a key both roots
+  carry with different text is reported as a mismatch instead of being resolved
+  silently.
+
 ## Future converted outputs
 
 Converters will write their results into the same blob namespace. Their cache identity is the tuple below:

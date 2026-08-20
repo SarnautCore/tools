@@ -31,7 +31,15 @@ impl OutputWriter {
                 .validate(kind, &instance)
                 .with_context(|| format!("validate {}", path.display()))?;
         }
+        self.write_unvalidated(path, document)
+    }
 
+    /// Write a document that no public schema covers, such as the item index.
+    pub(crate) fn write_unvalidated<T: Serialize>(
+        &self,
+        path: &Path,
+        document: &T,
+    ) -> Result<bool> {
         let mut yaml = serde_yaml::to_string(document)?;
         if !yaml.ends_with('\n') {
             yaml.push('\n');

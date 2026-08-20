@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use sarnaut_extract::{ExtractionOptions, discover_schema_dir, extract_items, extract_zone};
+use sarnaut_extract::{
+    ExtractionOptions, LocaleOptions, discover_schema_dir, extract_items, extract_locale,
+    extract_loot, extract_mobkinds, extract_zone,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "sarnaut-extract", version, about)]
@@ -18,6 +21,13 @@ enum Command {
     Items(CommonArgs),
     /// Extract quests, mobs, spawn tables, placements, and routes for one zone.
     Zone(ZoneArgs),
+    /// Resolve MobKind prototype chains, plus the classes, qualities and factions
+    /// one zone's mobs reach.
+    Mobkinds(ZoneArgs),
+    /// Extract the loot tables one zone's mob kinds reach, plus the item index.
+    Loot(ZoneArgs),
+    /// Resolve the loc_ref strings one zone's content points at.
+    Locale(LocaleArgs),
 }
 
 #[derive(Debug, Args)]
@@ -44,6 +54,24 @@ struct ZoneArgs {
     /// Zone directory name or its kebab-case form.
     #[arg(long)]
     name: String,
+    #[command(flatten)]
+    common: CommonArgs,
+}
+
+#[derive(Debug, Args)]
+struct LocaleArgs {
+    /// Zone directory name or its kebab-case form.
+    #[arg(long)]
+    name: String,
+    /// BCP 47 language subtag for the strings in the source trees.
+    #[arg(long, default_value = "ru")]
+    language: String,
+    /// A second data root read only for keys the primary root does not carry.
+    #[arg(long)]
+    supplemental_src: Option<PathBuf>,
+    /// Fail when more than this share of loc_refs stay unresolved, in percent.
+    #[arg(long, default_value_t = 5.0)]
+    max_unresolved_rate: f64,
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -82,6 +110,72 @@ fn run(cli: Cli) -> Result<()> {
             println!("mobs: {}", summary.mobs);
             println!("routes: {}", summary.routes);
             println!("unchanged files: {}", summary.unchanged);
+        }
+        Command::Mobkinds(args) => {
+            let name = args.name;
+            let options = options(args.common)?;
+            let summary = extract_mobkinds(&name, &options)?;
+            println!("zone: {}", summary.zone);
+            println!("mob worlds scanned: {}", summary.mob_worlds);
+            println!("mob kinds: {}", summary.mob_kinds);
+            println!("prototype mob kinds: {}", summary.prototypes);
+            println!("mob classes: {}", summary.mob_classes);
+            println!("mob qualities: {}", summary.mob_qualities);
+            println!("factions: {}", summary.factions);
+            println!("unchanged files: {}", summary.unchanged);
+            println!("level curve: not found in source; curated overlay constant");
+        }
+        Command::Loot(args) => {
+            let name = args.name;
+            let validate = args.common.validate;
+            let options = options(args.common)?;
+            let summary = extract_loot(&name, &options)?;
+            println!("zone: {}", summary.zone);
+            println!("loot tables: {}", summary.tables);
+            println!("loot nodes: {}", summary.nodes);
+            println!("indexed items: {}", summary.item_index);
+            println!("dangling item references: {}", summary.dangling_items.len());
+            println!("unchanged files: {}", summary.unchanged);
+            if validate && !summary.dangling_items.is_empty() {
+                for offender in &summary.dangling_items {
+                    eprintln!("dangling item reference: {offender}");
+                }
+                bail!(
+                    "{} loot item references resolve to no item document",
+                    summary.dangling_items.len()
+                );
+            }
+        }
+        Command::Locale(args) => {
+            let name = args.name;
+            let validate = args.common.validate;
+            let limit = args.max_unresolved_rate;
+            let options = LocaleOptions {
+                common: options(args.common)?,
+                language: args.language,
+                supplemental_src: args.supplemental_src,
+            };
+            let summary = extract_locale(&name, &options)?;
+            let rate = summary.unresolved_rate();
+            println!("zone: {}", summary.zone);
+            println!("language: {}", summary.language);
+            println!("loc_refs requested: {}", summary.requested);
+            println!("resolved: {}", summary.resolved);
+            println!("from primary root: {}", summary.from_primary);
+            println!("from supplemental root: {}", summary.from_supplemental);
+            println!("root mismatches: {}", summary.mismatched.len());
+            println!("unresolved: {}", summary.unresolved.len());
+            println!("unresolved rate: {rate:.2}%");
+            println!("unchanged files: {}", summary.unchanged);
+            for key in summary.mismatched.iter().take(20) {
+                eprintln!("root mismatch: {key}");
+            }
+            for key in summary.unresolved.iter().take(20) {
+                eprintln!("unresolved loc_ref: {key}");
+            }
+            if validate && rate > limit {
+                bail!("unresolved loc_ref rate {rate:.2}% exceeds the {limit:.2}% budget");
+            }
         }
     }
     Ok(())

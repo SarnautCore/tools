@@ -1,9 +1,17 @@
 //! Deterministic extraction of Allods XDB resources into authored YAML.
 
+mod encoding;
+mod faction;
 mod item;
+mod locale;
+mod loot;
+mod mobkind;
 mod model;
 mod output;
 mod reference;
+mod scan;
+#[cfg(test)]
+mod testing;
 mod validation;
 mod xdb;
 mod zone;
@@ -11,7 +19,13 @@ mod zone;
 use std::path::PathBuf;
 
 pub use item::extract_items;
-pub use model::{ExtractionOptions, ItemSummary, ZoneSummary};
+pub use locale::extract_locale;
+pub use loot::extract_loot;
+pub use mobkind::extract_mobkinds;
+pub use model::{
+    ExtractionOptions, ItemSummary, LocaleOptions, LocaleSummary, LootSummary, MobKindSummary,
+    ZoneSummary,
+};
 pub use validation::{SchemaKind, SchemaValidator};
 pub use zone::extract_zone;
 
