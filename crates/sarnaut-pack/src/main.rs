@@ -177,6 +177,12 @@ fn print_summary(pack: &CompiledPack) {
     if !pack.manifest.source.overlays.is_empty() {
         println!("overlays {}", pack.manifest.source.overlays.join(", "));
     }
+    for document in &pack.report.skipped_overlay_documents {
+        println!(
+            "skip     {} (layer {}): {}",
+            document.document, document.layer, document.note
+        );
+    }
     for (name, rows) in pack.tables() {
         println!("table    {name} ({rows} rows)");
     }

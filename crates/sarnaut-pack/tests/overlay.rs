@@ -114,6 +114,89 @@ flags:
 }
 
 #[test]
+fn an_out_of_scope_partial_overlay_patch_is_skipped() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    common::write_layer(
+        &source,
+        "curated",
+        &[(
+            "foreign-sparrow.yaml",
+            r#"schema_version: 1
+id: mob.other-zone.sparrow
+curation_note: This patch belongs to a different zone pack.
+walk_speed: 4.5
+"#,
+        )],
+    );
+
+    let out = workspace.path().join("pack");
+    let pack = compile::build(&common::options(source), &out)
+        .expect("an out-of-scope partial patch should be skipped");
+
+    assert_eq!(pack.report.skipped_overlay_documents.len(), 1);
+    let skipped = &pack.report.skipped_overlay_documents[0];
+    assert_eq!(skipped.document, "mob.other-zone.sparrow");
+    assert!(skipped.note.contains("outside the selected zone"));
+    let report = fs::read_to_string(out.join("build-report.json")).expect("read build report");
+    assert!(report.contains("skipped_overlay_documents"), "{report}");
+    assert!(report.contains("document skipped"), "{report}");
+
+    let mobs: Vec<proto::Mob> = decode(&out, "mobs");
+    assert!(
+        mobs.iter().all(|mob| mob.id != "mob.other-zone.sparrow"),
+        "the out-of-scope partial patch leaked into the pack"
+    );
+}
+
+#[test]
+fn an_out_of_scope_full_overlay_document_is_excluded() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    common::write_layer(
+        &source,
+        "curated",
+        &[(
+            "foreign-sparrow.yaml",
+            r#"schema_version: 1
+id: mob.other-zone.sparrow
+kind: mob
+zone: zone.other-zone
+curation_note: This complete mob belongs to a different zone pack.
+source_type: demo.MobWorldResource
+loc_ref:
+  name: Sparrow.Name.txt
+mob_kind:
+  id: mobkind.base.harbour
+quality:
+  id: mobquality.common
+faction:
+  id: faction.wild
+level_min: 2
+level_max: 2
+walk_speed: 4.5
+"#,
+        )],
+    );
+
+    let out = workspace.path().join("pack");
+    let pack = compile::build(&common::options(source), &out)
+        .expect("an out-of-scope full document should be excluded");
+
+    assert_eq!(pack.report.skipped_overlay_documents.len(), 1);
+    assert_eq!(
+        pack.report.skipped_overlay_documents[0].document,
+        "mob.other-zone.sparrow"
+    );
+
+    let mobs: Vec<proto::Mob> = decode(&out, "mobs");
+    assert!(
+        mobs.iter().all(|mob| mob.id != "mob.other-zone.sparrow"),
+        "the out-of-scope full document leaked into the pack"
+    );
+}
+
+#[test]
 fn layers_apply_in_manifest_order_whatever_order_they_are_named_in() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));

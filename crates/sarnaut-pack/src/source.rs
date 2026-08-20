@@ -57,6 +57,9 @@ pub struct SourceTree {
     /// Why each curated document exists. Aggregated into `build-report.json`
     /// and never written into table bytes (ADR 0029).
     pub notes: Vec<CurationNote>,
+    /// Overlay documents whose declared or canonical-id zone is outside this
+    /// build's zone selection.
+    pub skipped_overlay_documents: Vec<SkippedOverlayDocument>,
     /// Leaves two overlay layers both wrote.
     pub conflicts: Vec<Conflict>,
     /// Ids an overlay removed outright.
@@ -73,6 +76,15 @@ pub struct AppliedLayer {
     pub id: String,
     pub description: String,
     pub documents: usize,
+}
+
+/// One overlay document omitted because it belongs to another zone pack.
+#[derive(Clone, Debug)]
+pub struct SkippedOverlayDocument {
+    pub document_id: String,
+    pub layer: String,
+    pub source: String,
+    pub note: String,
 }
 
 /// Where an extracted document came from. Only the path is read, and only to
@@ -735,12 +747,23 @@ pub fn load(options: &LoadOptions<'_>) -> Result<SourceTree> {
     // create a document out of the patch alone.
     let mut applied = Vec::new();
     let mut item_patches: Vec<(String, PathBuf, Value)> = Vec::new();
+    let mut skipped_overlay_documents = Vec::new();
     for layer in &layers {
         let files = layer_files(layer)?;
         let mut count = 0;
         for path in files {
             let value = read_yaml(&path)?;
-            let id = value.get("id").and_then(Value::as_str).unwrap_or_default();
+            let (id, _) = overlay::document_metadata(&layer.id, &path, &value)?;
+            if let Some(note) = out_of_scope_note(options, &value, &id) {
+                skipped_overlay_documents.push(SkippedOverlayDocument {
+                    document_id: id,
+                    layer: layer.id.clone(),
+                    source: path.display().to_string(),
+                    note,
+                });
+                count += 1;
+                continue;
+            }
             if options.layout == Layout::Ruleset && id.starts_with("item.") {
                 item_patches.push((layer.id.clone(), path, value));
             } else {
@@ -757,6 +780,7 @@ pub fn load(options: &LoadOptions<'_>) -> Result<SourceTree> {
 
     let mut tree = SourceTree {
         layers: applied,
+        skipped_overlay_documents,
         ..SourceTree::default()
     };
     let mut loot_documents: BTreeMap<String, LootTableDocument> = BTreeMap::new();
@@ -801,6 +825,39 @@ pub fn load(options: &LoadOptions<'_>) -> Result<SourceTree> {
         bail!("{} holds no placement documents", options.root.display());
     }
     Ok(tree)
+}
+
+/// Explains why an overlay document is outside a ruleset build's selected
+/// zone. A full document's `zone` is authoritative. A partial patch may omit
+/// that field, so canonical ids supply the scope for zone-owned kinds.
+fn out_of_scope_note(
+    options: &LoadOptions<'_>,
+    value: &Value,
+    document_id: &str,
+) -> Option<String> {
+    if options.layout != Layout::Ruleset {
+        return None;
+    }
+    let selected = options.zone?;
+    let target = explicit_zone(value).or_else(|| zone_from_document_id(document_id))?;
+    (target != selected).then(|| {
+        format!("target zone {target} is outside the selected zone {selected}; document skipped")
+    })
+}
+
+fn explicit_zone(value: &Value) -> Option<&str> {
+    value
+        .get("zone")
+        .and_then(Value::as_str)
+        .and_then(|zone| zone.strip_prefix("zone."))
+}
+
+fn zone_from_document_id(document_id: &str) -> Option<&str> {
+    let mut parts = document_id.split('.');
+    match parts.next()? {
+        "zone" | "spawn" | "mob" | "quest" | "route" => parts.next(),
+        _ => None,
+    }
 }
 
 /// Chooses the loot tables this zone's mobs reach, then opens exactly the item
