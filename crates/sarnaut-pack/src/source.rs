@@ -23,6 +23,120 @@ pub enum Layout {
 pub struct SourceTree {
     pub placement_documents: Vec<PlacementDocument>,
     pub tables: Vec<SpawnTableDocument>,
+    pub mobs: Vec<MobDocument>,
+    pub mob_kinds: Vec<MobKindDocument>,
+    pub abilities: Vec<AbilityDocument>,
+    pub factions: Vec<FactionDocument>,
+}
+
+/// The localization keys a document carries. Only `name` reaches a pack row;
+/// the rest are read by the client from the locale tables (ADR 0007).
+#[derive(Debug, Default, Deserialize)]
+pub struct LocRef {
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// One creature record: the combat inputs of `mechanics/combat.md` section 4.
+#[derive(Debug, Deserialize)]
+pub struct MobDocument {
+    pub id: String,
+    pub zone: String,
+    #[serde(default)]
+    pub loc_ref: LocRef,
+    #[serde(default)]
+    pub mob_kind: Option<ObjectRef>,
+    #[serde(default)]
+    pub faction: Option<ObjectRef>,
+    #[serde(default)]
+    pub loot_table: Option<ObjectRef>,
+    #[serde(default)]
+    pub level_min: Option<u32>,
+    #[serde(default)]
+    pub level_max: Option<u32>,
+    #[serde(default)]
+    pub walk_speed: Option<f32>,
+    #[serde(default)]
+    pub aggro_radius_m: Option<f32>,
+    #[serde(default)]
+    pub leash_radius_m: Option<f32>,
+    #[serde(default)]
+    pub abilities: Vec<ObjectRef>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// A `MobKind`, `MobClass` or `MobQuality` document. Only `hp_mod` is read:
+/// `mechanics/combat.md` section 7.1 defers the rest of the multiplier chain.
+#[derive(Debug, Deserialize)]
+pub struct MobKindDocument {
+    pub id: String,
+    #[serde(default)]
+    pub hp_mod: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AbilityDocument {
+    pub id: String,
+    #[serde(default)]
+    pub loc_ref: LocRef,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub range_m: Option<f32>,
+    #[serde(default)]
+    pub cast_time_ms: Option<u32>,
+    #[serde(default)]
+    pub cooldown_ms: Option<u32>,
+    #[serde(default)]
+    pub triggers_gcd: Option<bool>,
+    #[serde(default)]
+    pub effects: Vec<AbilityEffectDocument>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AbilityEffectDocument {
+    pub kind: String,
+    #[serde(default)]
+    pub element: Option<String>,
+    #[serde(default)]
+    pub amount: Option<f32>,
+    #[serde(default)]
+    pub attack_power_coeff: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FactionDocument {
+    pub id: String,
+    #[serde(default)]
+    pub loc_ref: LocRef,
+    #[serde(default)]
+    pub player_faction: bool,
+    #[serde(default)]
+    pub attackable: bool,
+    #[serde(default)]
+    pub default_stance: Option<String>,
+    #[serde(default)]
+    pub relations: Vec<FactionRelationDocument>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FactionRelationDocument {
+    pub faction: String,
+    pub stance: String,
+}
+
+/// The respawn window an authored placement carries, in milliseconds.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+pub struct RespawnWindow {
+    #[serde(default)]
+    pub min: u32,
+    #[serde(default)]
+    pub max: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +163,8 @@ pub struct SourcePlacement {
     pub route: Option<String>,
     #[serde(default)]
     pub scan_radius: Option<f32>,
+    #[serde(default)]
+    pub respawn_delay_ms: Option<RespawnWindow>,
     #[serde(default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -100,12 +216,24 @@ pub struct Orientation {
     pub yaw: f32,
 }
 
-/// Loads every document the compiler understands from `root`.
+/// Loads every document the compiler understands from `root`, then from each
+/// directory in `overlays` in order.
 ///
 /// `zone` is required for [`Layout::Ruleset`], which addresses one zone
 /// directory; [`Layout::Flat`] reads whatever documents the directory holds.
-pub fn load(root: &Path, layout: Layout, ruleset: &str, zone: Option<&str>) -> Result<SourceTree> {
-    let files = match layout {
+///
+/// An overlay is always a flat directory of extra documents. It adds; it does
+/// not patch. Two documents with the same id are rejected wherever they came
+/// from, because a silent last-one-wins would make the compiled pack depend on
+/// argument order in a way nothing checks.
+pub fn load(
+    root: &Path,
+    overlays: &[PathBuf],
+    layout: Layout,
+    ruleset: &str,
+    zone: Option<&str>,
+) -> Result<SourceTree> {
+    let mut files = match layout {
         Layout::Ruleset => {
             let zone = zone.ok_or_else(|| {
                 anyhow!("a zone slug is required when reading a ruleset source tree")
@@ -113,10 +241,20 @@ pub fn load(root: &Path, layout: Layout, ruleset: &str, zone: Option<&str>) -> R
             let spawns = root.join(ruleset).join("zones").join(zone).join("spawns");
             let mut files = yaml_files(&spawns.join("placements"))?;
             files.extend(yaml_files(&spawns.join("tables"))?);
+            // Mob records are per-zone in the authored tree. The directory is
+            // optional because a zone can be all placements and tables, and a
+            // pack with no mob rows is a legal, if unplayable, pack. Global
+            // resources — abilities, factions — have no home in the ruleset
+            // tree yet and arrive through `--overlay` until the extractor
+            // writes them.
+            files.extend(optional_yaml_files(&spawns.join("mobs"))?);
             files
         }
         Layout::Flat => yaml_files(root)?,
     };
+    for overlay in overlays {
+        files.extend(yaml_files(overlay)?);
+    }
 
     let mut tree = SourceTree::default();
     for path in files {
@@ -124,26 +262,62 @@ pub fn load(root: &Path, layout: Layout, ruleset: &str, zone: Option<&str>) -> R
             .with_context(|| format!("read authored document {}", path.display()))?;
         let document: Value = serde_yaml::from_str(&text)
             .with_context(|| format!("parse authored document {}", path.display()))?;
-        let kind = document.get("kind").and_then(Value::as_str).unwrap_or("");
-        match kind {
-            "placements" => tree.placement_documents.push(
-                serde_yaml::from_value(document)
-                    .with_context(|| format!("read placements from {}", path.display()))?,
-            ),
-            "table" => tree.tables.push(
-                serde_yaml::from_value(document)
-                    .with_context(|| format!("read spawn table from {}", path.display()))?,
-            ),
-            // `mob`, items, quests and routes carry no runtime rows yet. A pack
-            // that needs them gets a table of its own rather than a guess here.
-            _ => continue,
-        }
+        read_document(&mut tree, document, &path)?;
     }
 
     if tree.placement_documents.is_empty() {
         bail!("{} holds no placement documents", root.display());
     }
     Ok(tree)
+}
+
+/// Files a document into the tree.
+///
+/// Spawn documents declare their own `kind`. Abilities and factions are global
+/// resources with no `kind` field, so they are recognised by the first segment
+/// of their canonical id, which ADR 0007 makes the document's type tag.
+fn read_document(tree: &mut SourceTree, document: Value, path: &Path) -> Result<()> {
+    let kind = document.get("kind").and_then(Value::as_str).unwrap_or("");
+    let id = document.get("id").and_then(Value::as_str).unwrap_or("");
+    let prefix = id.split('.').next().unwrap_or("");
+    let what = if kind.is_empty() { prefix } else { kind };
+    let context = |label: &str| format!("read {label} from {}", path.display());
+    match what {
+        "placements" => tree
+            .placement_documents
+            .push(serde_yaml::from_value(document).with_context(|| context("placements"))?),
+        "table" => tree
+            .tables
+            .push(serde_yaml::from_value(document).with_context(|| context("spawn table"))?),
+        "mob" => tree
+            .mobs
+            .push(serde_yaml::from_value(document).with_context(|| context("mob"))?),
+        // The creature taxonomy is three record types in one schema. Only the
+        // ones that can carry `hp_mod` are read, and only for that field.
+        "mobkind" | "mobquality" => tree
+            .mob_kinds
+            .push(serde_yaml::from_value(document).with_context(|| context("mob kind"))?),
+        "ability" => tree
+            .abilities
+            .push(serde_yaml::from_value(document).with_context(|| context("ability"))?),
+        "faction" => tree
+            .factions
+            .push(serde_yaml::from_value(document).with_context(|| context("faction"))?),
+        // Items, quests, routes, locales and chargen options carry no runtime
+        // rows here. A pack that needs them gets a table of its own rather
+        // than a guess in this match.
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Like [`yaml_files`], but an absent directory yields nothing instead of an
+/// error.
+fn optional_yaml_files(directory: &Path) -> Result<Vec<PathBuf>> {
+    if !directory.is_dir() {
+        return Ok(Vec::new());
+    }
+    yaml_files(directory)
 }
 
 /// Lists `*.yaml` files directly inside `directory`, sorted by file name so that

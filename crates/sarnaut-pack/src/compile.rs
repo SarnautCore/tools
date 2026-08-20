@@ -15,6 +15,14 @@ use crate::table::{self, Row};
 pub const TABLE_ZONE: &str = "zone";
 pub const TABLE_PLACEMENTS: &str = "placements";
 pub const TABLE_SPAWN_TABLES: &str = "spawn-tables";
+pub const TABLE_ABILITIES: &str = "abilities";
+pub const TABLE_FACTIONS: &str = "factions";
+pub const TABLE_MOBS: &str = "mobs";
+
+/// A mob record that names no MobKind, or one whose MobKind carries no
+/// `hp_mod`, is written with this multiplier. It matches `mechanics/combat.md`
+/// rule 5.1.1, which defaults the argument rather than treating it as missing.
+const DEFAULT_HP_MOD: f32 = 1.0;
 
 /// A spawn schedule of `time-never` marks an authored object as inert. The
 /// shard still sees the row; the resolver skips it.
@@ -32,6 +40,9 @@ pub struct PlayerSpawn {
 #[derive(Debug)]
 pub struct BuildOptions {
     pub source: PathBuf,
+    /// Extra flat directories layered over `source`, in order. They add
+    /// documents; they do not patch the ones already there.
+    pub overlays: Vec<PathBuf>,
     pub out: PathBuf,
     pub layout: Layout,
     pub ruleset: String,
@@ -54,6 +65,7 @@ pub struct BuildReport {
 pub fn build(options: &BuildOptions) -> Result<BuildReport> {
     let tree = source::load(
         &options.source,
+        &options.overlays,
         options.layout,
         &options.ruleset,
         options.zone.as_deref(),
@@ -68,7 +80,14 @@ pub fn build(options: &BuildOptions) -> Result<BuildReport> {
     let known_tables: BTreeSet<&str> = spawn_tables.iter().map(|row| row.key.as_str()).collect();
     let placements = placement_rows(&tree, &known_tables, options.keep_extra)?;
     let zone_row = zone_row(&zone_id, &zone_slug, options, &tree)?;
+    let abilities = ability_rows(&tree, options.keep_extra)?;
+    let factions = faction_rows(&tree, options.keep_extra)?;
+    let known_abilities: BTreeSet<&str> = abilities.iter().map(|row| row.key.as_str()).collect();
+    let known_factions: BTreeSet<&str> = factions.iter().map(|row| row.key.as_str()).collect();
+    let mobs = mob_rows(&tree, &known_abilities, &known_factions, options.keep_extra)?;
 
+    // Every table is written even when it has no rows, so a reader can insist
+    // on the full set rather than treating "absent" and "empty" as one case.
     let encoded = vec![
         (
             TABLE_ZONE.to_string(),
@@ -87,6 +106,24 @@ pub fn build(options: &BuildOptions) -> Result<BuildReport> {
             proto::RowType::SpawnTable,
             table::encode(proto::RowType::SpawnTable as i32, &spawn_tables)?,
             spawn_tables.len() as u32,
+        ),
+        (
+            TABLE_ABILITIES.to_string(),
+            proto::RowType::Ability,
+            table::encode(proto::RowType::Ability as i32, &abilities)?,
+            abilities.len() as u32,
+        ),
+        (
+            TABLE_FACTIONS.to_string(),
+            proto::RowType::Faction,
+            table::encode(proto::RowType::Faction as i32, &factions)?,
+            factions.len() as u32,
+        ),
+        (
+            TABLE_MOBS.to_string(),
+            proto::RowType::Mob,
+            table::encode(proto::RowType::Mob as i32, &mobs)?,
+            mobs.len() as u32,
         ),
     ];
 
@@ -127,9 +164,19 @@ pub fn build(options: &BuildOptions) -> Result<BuildReport> {
         source: manifest::Source {
             repo: options.source_repo.clone(),
             commit,
-            // Overlay layering (ADR 0029) has no authored layers yet; the field
-            // is written empty rather than omitted so readers see a stable shape.
-            overlays: Vec::new(),
+            // Only the directory name is recorded, never the path it was read
+            // from: a manifest that embedded `..\data-schemas\...` would differ
+            // between a Windows rebuild and the Linux CI one, and the vendored
+            // fixture pack is compared byte for byte.
+            overlays: options
+                .overlays
+                .iter()
+                .map(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                })
+                .collect(),
         },
         keep_extra: options.keep_extra,
         tables: entries,
@@ -243,6 +290,15 @@ fn placement_rows(
                 );
             }
             let position = placed.position.unwrap_or_default();
+            let respawn = placed.respawn_delay_ms.unwrap_or_default();
+            if respawn.max < respawn.min {
+                bail!(
+                    "placement {} declares respawn_delay_ms min {} above max {}",
+                    placed.id,
+                    respawn.min,
+                    respawn.max
+                );
+            }
             let message = proto::Placement {
                 id: placed.id.clone(),
                 object_id,
@@ -256,6 +312,8 @@ fn placement_rows(
                 script_id: placed.script_id.clone().unwrap_or_default(),
                 route_id: placed.route.clone().unwrap_or_default(),
                 scan_radius: placed.scan_radius.unwrap_or_default(),
+                respawn_delay_min_ms: respawn.min,
+                respawn_delay_max_ms: respawn.max,
                 extra: extra_map(&placed.extra, keep_extra)?,
             };
             if seen.insert(placed.id.clone(), message).is_some() {
@@ -265,6 +323,142 @@ fn placement_rows(
     }
     if seen.is_empty() {
         bail!("source tree contains no placements");
+    }
+    Ok(encode_rows(seen))
+}
+
+fn ability_rows(tree: &SourceTree, keep_extra: bool) -> Result<Vec<Row>> {
+    let mut seen: BTreeMap<String, proto::Ability> = BTreeMap::new();
+    for document in &tree.abilities {
+        let message = proto::Ability {
+            id: document.id.clone(),
+            target: document.target.clone().unwrap_or_default(),
+            range_m: document.range_m.unwrap_or_default(),
+            cast_time_ms: document.cast_time_ms.unwrap_or_default(),
+            cooldown_ms: document.cooldown_ms.unwrap_or_default(),
+            triggers_gcd: document.triggers_gcd.unwrap_or_default(),
+            effects: document
+                .effects
+                .iter()
+                .map(|effect| proto::AbilityEffect {
+                    kind: effect.kind.clone(),
+                    element: effect.element.clone().unwrap_or_default(),
+                    amount: effect.amount.unwrap_or_default(),
+                    attack_power_coeff: effect.attack_power_coeff.unwrap_or_default(),
+                })
+                .collect(),
+            name_key: document.loc_ref.name.clone().unwrap_or_default(),
+            extra: extra_map(&document.extra, keep_extra)?,
+        };
+        if seen.insert(document.id.clone(), message).is_some() {
+            bail!("ability id {} is declared twice", document.id);
+        }
+    }
+    Ok(encode_rows(seen))
+}
+
+fn faction_rows(tree: &SourceTree, keep_extra: bool) -> Result<Vec<Row>> {
+    let mut seen: BTreeMap<String, proto::Faction> = BTreeMap::new();
+    for document in &tree.factions {
+        let message = proto::Faction {
+            id: document.id.clone(),
+            player_faction: document.player_faction,
+            attackable: document.attackable,
+            default_stance: document.default_stance.clone().unwrap_or_default(),
+            relations: document
+                .relations
+                .iter()
+                .map(|relation| proto::FactionRelation {
+                    faction_id: relation.faction.clone(),
+                    stance: relation.stance.clone(),
+                })
+                .collect(),
+            name_key: document.loc_ref.name.clone().unwrap_or_default(),
+            extra: extra_map(&document.extra, keep_extra)?,
+        };
+        if seen.insert(document.id.clone(), message).is_some() {
+            bail!("faction id {} is declared twice", document.id);
+        }
+    }
+    Ok(encode_rows(seen))
+}
+
+/// Builds the mob rows, resolving each mob's `hp_mod` from the MobKind it
+/// names. Only the named record's own value is read: the prototype chain and
+/// the quality multipliers are deferred by `mechanics/combat.md` section 7.1,
+/// and walking half of a chain would produce a number nothing can explain.
+fn mob_rows(
+    tree: &SourceTree,
+    known_abilities: &BTreeSet<&str>,
+    known_factions: &BTreeSet<&str>,
+    keep_extra: bool,
+) -> Result<Vec<Row>> {
+    let mut hp_mods: BTreeMap<&str, f32> = BTreeMap::new();
+    for kind in &tree.mob_kinds {
+        if let Some(value) = kind.hp_mod {
+            hp_mods.insert(kind.id.as_str(), value);
+        }
+    }
+
+    let mut seen: BTreeMap<String, proto::Mob> = BTreeMap::new();
+    for document in &tree.mobs {
+        let faction_id = document
+            .faction
+            .as_ref()
+            .and_then(|reference| reference.id.clone())
+            .unwrap_or_default();
+        // ADR 0006's cross-reference check. A mob whose faction is absent has
+        // no hostility to evaluate, so combat.md rule 5.2.5 could not run.
+        if !faction_id.is_empty() && !known_factions.contains(faction_id.as_str()) {
+            bail!(
+                "mob {} names faction {faction_id}, which this pack does not carry",
+                document.id
+            );
+        }
+        let mob_kind_id = document
+            .mob_kind
+            .as_ref()
+            .and_then(|reference| reference.id.clone())
+            .unwrap_or_default();
+        let mut ability_ids = Vec::with_capacity(document.abilities.len());
+        for reference in &document.abilities {
+            let Some(ability_id) = reference.id.clone() else {
+                continue;
+            };
+            if !known_abilities.contains(ability_id.as_str()) {
+                bail!(
+                    "mob {} names ability {ability_id}, which this pack does not carry",
+                    document.id
+                );
+            }
+            ability_ids.push(ability_id);
+        }
+
+        let message = proto::Mob {
+            id: document.id.clone(),
+            name_key: document.loc_ref.name.clone().unwrap_or_default(),
+            faction_id,
+            hp_mod: hp_mods
+                .get(mob_kind_id.as_str())
+                .copied()
+                .unwrap_or(DEFAULT_HP_MOD),
+            mob_kind_id,
+            level_min: document.level_min.unwrap_or_default(),
+            level_max: document.level_max.unwrap_or_default(),
+            walk_speed: document.walk_speed.unwrap_or_default(),
+            aggro_radius_m: document.aggro_radius_m.unwrap_or_default(),
+            leash_radius_m: document.leash_radius_m.unwrap_or_default(),
+            ability_ids,
+            loot_table_id: document
+                .loot_table
+                .as_ref()
+                .and_then(|reference| reference.id.clone())
+                .unwrap_or_default(),
+            extra: extra_map(&document.extra, keep_extra)?,
+        };
+        if seen.insert(document.id.clone(), message).is_some() {
+            bail!("mob id {} is declared twice", document.id);
+        }
     }
     Ok(encode_rows(seen))
 }

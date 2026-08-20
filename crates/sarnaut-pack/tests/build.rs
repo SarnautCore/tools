@@ -27,6 +27,9 @@ fn two_builds_of_one_source_tree_are_byte_identical() {
         "tables/zone.sptbl",
         "tables/placements.sptbl",
         "tables/spawn-tables.sptbl",
+        "tables/abilities.sptbl",
+        "tables/factions.sptbl",
+        "tables/mobs.sptbl",
     ] {
         assert_eq!(
             fs::read(first.join(relative)).expect("read first"),
@@ -58,7 +61,14 @@ fn manifest_records_every_table_and_its_digest() {
             .iter()
             .map(|entry| entry.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["placements", "spawn-tables", "zone"],
+        vec![
+            "abilities",
+            "factions",
+            "mobs",
+            "placements",
+            "spawn-tables",
+            "zone"
+        ],
         "manifest tables are not sorted by name"
     );
     for entry in &document.tables {
@@ -248,4 +258,131 @@ fn decode_zone(pack: &std::path::Path) -> proto::Zone {
     let rows = table::rows(&bytes).expect("rows");
     assert_eq!(rows.len(), 1, "a pack holds exactly one zone row");
     proto::Zone::decode(rows[0]).expect("decode zone")
+}
+
+#[test]
+fn combat_rows_carry_what_the_shard_reads() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_flat_source(&workspace.path().join("src"));
+    let out = workspace.path().join("pack");
+    compile::build(&common::flat_options(source, out.clone())).expect("build");
+
+    let abilities: Vec<proto::Ability> = decode(&out, "abilities");
+    assert_eq!(abilities.len(), 1);
+    assert_eq!(abilities[0].id, "ability.melee.cleave");
+    assert_eq!(abilities[0].range_m, 10.0);
+    assert!(abilities[0].triggers_gcd);
+    assert_eq!(abilities[0].effects.len(), 1);
+    assert_eq!(abilities[0].effects[0].amount, 18.0);
+    assert_eq!(abilities[0].effects[0].attack_power_coeff, 0.5);
+    assert_eq!(abilities[0].name_key, "Cleave.Name.txt");
+
+    let factions: Vec<proto::Faction> = decode(&out, "factions");
+    assert_eq!(factions.len(), 1);
+    assert!(factions[0].attackable);
+    assert_eq!(factions[0].default_stance, "hostile");
+    assert_eq!(factions[0].relations[0].faction_id, "faction.league");
+
+    let mobs: Vec<proto::Mob> = decode(&out, "mobs");
+    assert_eq!(mobs.len(), 1);
+    assert_eq!(mobs[0].faction_id, "faction.wild");
+    assert_eq!(mobs[0].level_min, 2);
+    assert_eq!(mobs[0].level_max, 2);
+    assert_eq!(mobs[0].walk_speed, 2.0);
+    assert_eq!(mobs[0].aggro_radius_m, 12.0);
+    assert_eq!(mobs[0].leash_radius_m, 40.0);
+    // Resolved from the MobKind the mob names, not defaulted.
+    assert_eq!(mobs[0].hp_mod, 0.5);
+    assert_eq!(mobs[0].ability_ids, vec!["ability.melee.cleave"]);
+
+    let placements: Vec<proto::Placement> = decode(&out, "placements");
+    assert_eq!(placements[0].respawn_delay_min_ms, 10000);
+    assert_eq!(placements[0].respawn_delay_max_ms, 14000);
+}
+
+#[test]
+fn an_overlay_adds_documents_and_is_recorded_in_the_manifest() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_flat_source(&workspace.path().join("src"));
+    let overlay = workspace.path().join("extended");
+    fs::create_dir_all(&overlay).expect("create overlay directory");
+    fs::write(
+        overlay.join("ability.brine-bolt.yaml"),
+        r#"schema_version: 1
+id: ability.magic.brine-bolt
+source_type: demo.SpellResource
+target: enemy
+range_m: 25.0
+cooldown_ms: 3000
+triggers_gcd: true
+effects:
+  - kind: damage
+    element: water
+    amount: 30
+    attack_power_coeff: 0.25
+"#,
+    )
+    .expect("write overlay ability");
+
+    let base = workspace.path().join("base-pack");
+    compile::build(&common::flat_options(source.clone(), base.clone())).expect("base build");
+    let out = workspace.path().join("pack");
+    let mut options = common::flat_options(source, out.clone());
+    options.overlays = vec![overlay];
+    compile::build(&options).expect("overlay build");
+
+    assert_eq!(decode::<proto::Ability>(&base, "abilities").len(), 1);
+    let abilities: Vec<proto::Ability> = decode(&out, "abilities");
+    assert_eq!(abilities.len(), 2);
+    assert_eq!(abilities[0].id, "ability.magic.brine-bolt");
+    assert_eq!(abilities[0].range_m, 25.0);
+    assert_eq!(abilities[0].cooldown_ms, 3000);
+
+    let document: Manifest = serde_json::from_str(
+        &fs::read_to_string(out.join("manifest.json")).expect("read manifest"),
+    )
+    .expect("parse manifest");
+    // The directory name, never the path it was read from: the fixture pack is
+    // compared byte for byte between a local rebuild and the CI one.
+    assert_eq!(document.source.overlays, vec!["extended".to_string()]);
+}
+
+#[test]
+fn a_mob_naming_an_unknown_faction_fails_the_build() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_flat_source(&workspace.path().join("src"));
+    fs::write(
+        source.join("mob.crab.yaml"),
+        format!(
+            r#"schema_version: 1
+id: mob.{zone}.crab
+kind: mob
+zone: zone.{zone}
+source_type: demo.MobWorldResource
+faction:
+  id: faction.does-not-exist
+level_min: 2
+level_max: 2
+"#,
+            zone = common::ZONE
+        ),
+    )
+    .expect("rewrite mob document");
+
+    let error = compile::build(&common::flat_options(source, workspace.path().join("pack")))
+        .expect_err("build should reject a dangling faction reference");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("faction.does-not-exist"),
+        "error does not name the missing faction: {message}"
+    );
+}
+
+fn decode<M: Message + Default>(pack: &std::path::Path, name: &str) -> Vec<M> {
+    let bytes = fs::read(pack.join(format!("tables/{name}.sptbl"))).expect("read table");
+    table::rows(&bytes)
+        .expect("rows")
+        .into_iter()
+        .map(|row| M::decode(row).expect("decode row"))
+        .collect()
 }

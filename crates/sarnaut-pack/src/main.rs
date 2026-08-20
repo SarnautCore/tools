@@ -38,6 +38,11 @@ struct BuildArgs {
     /// Source tree. Defaults to the demo dataset under `--fixture`.
     #[arg(long, value_name = "DIR")]
     src: Option<PathBuf>,
+    /// Flat directory of extra documents layered over `--src`. Repeatable;
+    /// layers apply in the order given. An overlay adds documents, it does not
+    /// patch them, so a duplicate id is an error rather than an override.
+    #[arg(long = "overlay", value_name = "DIR")]
+    overlays: Vec<PathBuf>,
     /// Pack directory to write.
     #[arg(long, value_name = "DIR")]
     out: PathBuf,
@@ -86,6 +91,7 @@ fn run_build(args: BuildArgs) -> Result<()> {
     };
     let options = BuildOptions {
         source,
+        overlays: args.overlays,
         out: args.out,
         layout: if args.fixture {
             Layout::Flat
