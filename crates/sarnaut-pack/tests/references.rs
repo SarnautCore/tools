@@ -401,9 +401,9 @@ fn a_locale_gap_is_reported_but_does_not_fail_a_build() {
 #[test]
 fn an_unresolved_locale_key_is_not_written_into_the_row() {
     // ADR 0011. An authored key the pack cannot resolve is a verbatim MY.GAMES
-    // resource path, and some of them embed a type name outright — the M2 zone
-    // holds `HealElixir.(ItemResource).txt`. Carrying one through would put a
-    // MY.GAMES type name in a compiled artifact.
+    // resource path, and some of those paths carry the source resource's class
+    // name in parentheses. Carrying one through would put a MY.GAMES type name
+    // in a compiled artifact.
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
     substitute(

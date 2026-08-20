@@ -127,11 +127,10 @@ deliberately not failures, and all three are counted in `build-report.json`:
 | **Locale gap** | A `loc_ref` key no locale document supplies. That is a loc pack nobody has extracted yet, not a broken edge. `--require-locale` promotes gaps to failures. |
 
 A key that does not resolve is written into the row as **empty**, never carried
-through. An unresolved key is a verbatim MY.GAMES resource path and some of them
-embed a type name outright — `HealElixir.(ItemResource).txt` is one the M2 zone
-holds — so carrying one through would put a MY.GAMES type name in a compiled
-artifact (ADR 0011). The shard falls back to the canonical id, which this project
-owns.
+through. An unresolved key is a verbatim MY.GAMES resource path, and some of
+those paths carry the source resource's class name in parentheses, so carrying
+one through would put a MY.GAMES type name in a compiled artifact (ADR 0011).
+The shard falls back to the canonical id, which this project owns.
 
 ## The `extra:` passthrough
 
