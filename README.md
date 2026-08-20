@@ -1,10 +1,11 @@
 # SarnautCore tools
 
-This repository contains command-line tools used to rebuild SarnautCore assets and game data. `sarnaut-assets` ingests source trees into a BLAKE3 content-addressed store. `sarnaut-extract` converts supported XDB resources to schema-validated YAML.
+This repository contains command-line tools used to rebuild SarnautCore assets and game data. `sarnaut-assets` ingests source trees into a BLAKE3 content-addressed store. `sarnaut-extract` converts supported XDB resources to schema-validated YAML. `sarnaut-pack` compiles that YAML into the runtime packs the shard loads; see [crates/sarnaut-pack/README.md](crates/sarnaut-pack/README.md).
 
 ## Build
 
-Rust 1.85 or newer is required.
+Rust 1.85 or newer is required. `sarnaut-pack` also needs `protoc` on `PATH`, or
+the `PROTOC` environment variable pointing at it.
 
 ```powershell
 cargo build --release
