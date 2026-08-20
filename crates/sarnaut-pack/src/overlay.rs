@@ -176,6 +176,23 @@ pub struct CurationNote {
     pub note: String,
 }
 
+/// Validates the metadata every overlay document must carry before source
+/// selection decides whether the document belongs to this build.
+pub(crate) fn document_metadata(
+    layer: &str,
+    path: &Path,
+    value: &Value,
+) -> Result<(String, String)> {
+    let id = document_id(value, path)?;
+    let note = note_of(value).ok_or_else(|| {
+        anyhow!(
+            "overlay layer {layer}: {}: document {id} carries no curation_note. ADR 0029 requires every overlay document to state why it exists",
+            path.display()
+        )
+    })?;
+    Ok((id, note))
+}
+
 /// Two layers writing the same leaf of the same document.
 #[derive(Clone, Debug)]
 pub struct Conflict {
@@ -274,13 +291,7 @@ impl DocumentSet {
     /// Applies one overlay document as a patch over whatever the merged result
     /// holds for its id so far.
     pub fn apply_overlay(&mut self, layer: &str, path: &Path, patch: Value) -> Result<()> {
-        let id = document_id(&patch, path)?;
-        let note = note_of(&patch).ok_or_else(|| {
-            anyhow!(
-                "overlay layer {layer}: {}: document {id} carries no curation_note. ADR 0029 requires every overlay document to state why it exists",
-                path.display()
-            )
-        })?;
+        let (id, note) = document_metadata(layer, path, &patch)?;
         self.notes.push(CurationNote {
             document_id: id.clone(),
             layer: layer.to_string(),

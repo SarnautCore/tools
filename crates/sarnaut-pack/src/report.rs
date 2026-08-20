@@ -23,6 +23,8 @@ pub struct BuildReport {
     pub zone: String,
     pub layers: Vec<LayerReport>,
     pub curation_notes: Vec<NoteReport>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped_overlay_documents: Vec<SkippedOverlayReport>,
     pub overlay_conflicts: Vec<String>,
     pub deleted_documents: Vec<String>,
     pub selection: SelectionReport,
@@ -38,6 +40,14 @@ pub struct LayerReport {
 
 #[derive(Debug, Serialize)]
 pub struct NoteReport {
+    pub document: String,
+    pub layer: String,
+    pub source: String,
+    pub note: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkippedOverlayReport {
     pub document: String,
     pub layer: String,
     pub source: String,
@@ -93,6 +103,16 @@ impl BuildReport {
                     layer: note.layer.clone(),
                     source: note.source.clone(),
                     note: note.note.clone(),
+                })
+                .collect(),
+            skipped_overlay_documents: tree
+                .skipped_overlay_documents
+                .iter()
+                .map(|document| SkippedOverlayReport {
+                    document: document.document_id.clone(),
+                    layer: document.layer.clone(),
+                    source: document.source.clone(),
+                    note: document.note.clone(),
                 })
                 .collect(),
             overlay_conflicts: tree

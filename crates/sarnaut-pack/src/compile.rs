@@ -153,7 +153,14 @@ pub fn compile(options: &BuildOptions) -> Result<CompiledPack> {
         refs::require_locale(&mut references);
     }
     if !references.is_clean() {
-        bail!("{}", references.failure_message());
+        let mut message = references.failure_message();
+        for document in &tree.skipped_overlay_documents {
+            message.push_str(&format!(
+                "\nnote: overlay layer {} skipped {}: {}",
+                document.layer, document.document_id, document.note
+            ));
+        }
+        bail!("{message}");
     }
 
     let level_curve = level_curve_row(&tree, options)?;
