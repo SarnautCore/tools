@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # `sarnaut-pack` compiles `sarnaut.content.v1` with prost-build, which shells
+  # out to protoc. Pinned to the version `server` generates its Go stubs with so
+  # both sides of ADR 0029 are produced by one compiler release.
+  PROTOC_VERSION: "35.1"
+
+jobs:
+  verify:
+    name: Build, test and lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust components
+        run: rustup component add clippy rustfmt
+
+      - name: Install protoc
+        run: |
+          curl --fail --silent --show-error --location \
+            --output "$RUNNER_TEMP/protoc.zip" \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  fixture-pack:
+    name: Fixture pack is reproducible
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      # The fixture is compiled from the hand-authored demo dataset. It contains
+      # no MY.GAMES-derived data, so it is the one pack a public runner may build
+      # and the one pack a public repository may vendor (ADR 0029).
+      - name: Check out data-schemas
+        uses: actions/checkout@v7
+        with:
+          repository: SarnautCore/data-schemas
+          path: data-schemas
+
+      - name: Install protoc
+        run: |
+          curl --fail --silent --show-error --location \
+            --output "$RUNNER_TEMP/protoc.zip" \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+          echo "PROTOC=$RUNNER_TEMP/protoc/bin/protoc" >> "$GITHUB_ENV"
+
+      - name: Build the fixture pack twice
+        run: |
+          cargo run --quiet -p sarnaut-pack -- build --fixture \
+            --src data-schemas/demo --out "$RUNNER_TEMP/pack-first"
+          cargo run --quiet -p sarnaut-pack -- build --fixture \
+            --src data-schemas/demo --out "$RUNNER_TEMP/pack-second"
+
+      - name: Assert the two builds are byte-identical
+        run: diff --recursive --brief "$RUNNER_TEMP/pack-first" "$RUNNER_TEMP/pack-second"
+
+      - name: Verify the fixture pack
+        run: cargo run --quiet -p sarnaut-pack -- verify "$RUNNER_TEMP/pack-first"
+
+      - name: Assert the fixture carries no untyped passthrough
+        run: |
+          if grep --quiet '"keep_extra": true' "$RUNNER_TEMP/pack-first/manifest.json"; then
+            echo "the fixture pack was built with --keep-extra" >&2
+            exit 1
+          fi

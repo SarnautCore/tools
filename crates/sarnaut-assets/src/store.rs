@@ -689,7 +689,10 @@ fn component_text(value: &OsStr) -> String {
 
 #[cfg(not(windows))]
 fn component_text(value: &OsStr) -> String {
-    value.to_string_lossy().into_owned()
+    // A literal percent sign is escaped here too, not only on Windows: a
+    // manifest names logical paths, and those must mean the same thing whoever
+    // ingested the tree.
+    value.to_string_lossy().replace('%', "%25")
 }
 
 fn normalize_lookup_path(value: &OsStr) -> String {

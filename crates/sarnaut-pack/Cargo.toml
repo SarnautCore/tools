@@ -1,0 +1,24 @@
+[package]
+name = "sarnaut-pack"
+version = "0.1.0"
+description = "Deterministic YAML to runtime pack compiler for SarnautCore"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+clap.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+walkdir.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

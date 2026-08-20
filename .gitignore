@@ -1,2 +1,4 @@
 /target/
 *.tmp
+# CI checks the demo dataset out here to build the golden fixture pack.
+/data-schemas/
