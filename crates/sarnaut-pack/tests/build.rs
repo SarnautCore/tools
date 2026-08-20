@@ -378,6 +378,111 @@ level_max: 2
     );
 }
 
+#[test]
+fn a_source_tree_with_no_chargen_document_carries_no_chargen_table() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    let out = workspace.path().join("pack");
+    let report = compile::build(&common::options(source, out.clone())).expect("build");
+
+    assert!(
+        !report.tables.iter().any(|(name, _)| name == "chargen"),
+        "a tree with no chargen documents produced a chargen table"
+    );
+    assert!(!out.join("tables/chargen.sptbl").exists());
+}
+
+#[test]
+fn chargen_documents_compile_into_the_chargen_table() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    common::write_chargen(&source);
+    let out = workspace.path().join("pack");
+    let report = compile::build(&common::options(source, out.clone())).expect("build");
+
+    assert_eq!(
+        report
+            .tables
+            .iter()
+            .find(|(name, _)| name == "chargen")
+            .map(|(_, rows)| *rows),
+        Some(2),
+        "both chargen documents should compile, enabled or not"
+    );
+
+    let bytes = fs::read(out.join("tables/chargen.sptbl")).expect("read chargen table");
+    let rows: Vec<proto::ChargenOption> = table::rows(&bytes)
+        .expect("rows")
+        .into_iter()
+        .map(|row| proto::ChargenOption::decode(row).expect("decode chargen option"))
+        .collect();
+
+    // Rows are keyed by canonical id, so the disabled `chargen.empire.*`
+    // document sorts ahead of the enabled League one.
+    assert_eq!(rows[0].id, "chargen.empire.warrior");
+    assert!(
+        !rows[0].enabled,
+        "a disabled option is carried, not dropped"
+    );
+
+    let league = &rows[1];
+    assert_eq!(league.id, "chargen.league.warrior");
+    assert!(league.enabled);
+    assert_eq!(league.race, "race.human");
+    assert_eq!(league.class, "class.warrior");
+    assert_eq!(league.starting_level, 3);
+    assert_eq!(league.spawn_zone_id, "zone.harbour-watch");
+    let spawn = league.spawn_position.expect("option carries a spawn");
+    assert_eq!((spawn.x, spawn.y, spawn.z), (12.0, 4.5, 0.5));
+    assert_eq!(league.spawn_heading, 1.5);
+    assert_eq!(league.starting_stats.len(), 1);
+    assert_eq!(league.starting_stats[0].stat, "strength");
+    assert_eq!(league.starting_loadout.len(), 1);
+    assert_eq!(
+        league.starting_loadout[0].item_id,
+        "item.consumable.harbour-tonic"
+    );
+    assert_eq!(league.starting_loadout[0].quantity, 3);
+    assert_eq!(league.starting_loadout[0].slot, "bag");
+    assert_eq!(league.starting_abilities, vec!["ability.melee.cleave"]);
+    assert_eq!(league.starting_quests, vec!["quest.harbour-watch.first"]);
+    assert_eq!(league.name_key, "HarbourWarrior.Name.txt");
+}
+
+#[test]
+fn a_chargen_option_spawning_outside_a_canonical_zone_fails_the_build() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    common::write_chargen(&source);
+    fs::write(
+        source.join("classic/chargen/broken.yaml"),
+        r#"schema_version: 1
+id: chargen.league.broken
+source_type: demo.ChargenOption
+race: race.human
+class: class.warrior
+sex: female
+faction: faction.league
+enabled: true
+visual_ref: Demo/Visuals/Broken.gd
+spawn:
+  zone_id: harbour-watch
+  position: { x: 0.0, y: 0.0, z: 0.0 }
+  heading: 0.0
+starting_level: 1
+"#,
+    )
+    .expect("write broken chargen document");
+
+    let error = compile::build(&common::options(source, workspace.path().join("pack")))
+        .expect_err("build should reject a non-canonical zone reference");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("chargen.league.broken"),
+        "error does not name the option: {message}"
+    );
+}
+
 fn decode<M: Message + Default>(pack: &std::path::Path, name: &str) -> Vec<M> {
     let bytes = fs::read(pack.join(format!("tables/{name}.sptbl"))).expect("read table");
     table::rows(&bytes)

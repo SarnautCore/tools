@@ -76,6 +76,67 @@ placements:
 }
 
 /// Build options for the tree [`write_source`] writes.
+/// Adds the ruleset-global chargen documents of ADR 0032 to a tree
+/// [`write_source`] already wrote: one playable option and one that is not.
+pub fn write_chargen(source: &Path) {
+    let chargen = source.join("classic").join("chargen");
+    fs::create_dir_all(&chargen).expect("create chargen directory");
+
+    fs::write(
+        chargen.join("league-warrior.yaml"),
+        r#"schema_version: 1
+id: chargen.league.warrior
+source_type: demo.ChargenOption
+race: race.human
+class: class.warrior
+sex: female
+faction: faction.league
+enabled: true
+loc_ref:
+  name: HarbourWarrior.Name.txt
+  description: HarbourWarrior.Description.txt
+visual_ref: Demo/Visuals/HarbourWarrior.gd
+spawn:
+  zone_id: zone.harbour-watch
+  position: { x: 12.0, y: 4.5, z: 0.5 }
+  heading: 1.5
+starting_level: 3
+starting_stats:
+  - stat: strength
+    value: 12
+starting_loadout:
+  - item_id: item.consumable.harbour-tonic
+    quantity: 3
+    slot: bag
+starting_abilities:
+  - ability.melee.cleave
+starting_quests:
+  - quest.harbour-watch.first
+"#,
+    )
+    .expect("write chargen document");
+
+    fs::write(
+        chargen.join("empire-warrior.yaml"),
+        r#"schema_version: 1
+id: chargen.empire.warrior
+source_type: demo.ChargenOption
+race: race.orc
+class: class.warrior
+sex: male
+faction: faction.empire
+enabled: false
+visual_ref: Demo/Visuals/EmpireWarrior.gd
+spawn:
+  zone_id: zone.harbour-watch
+  position: { x: -2.0, y: 0.0, z: 0.0 }
+  heading: 0.0
+starting_level: 1
+"#,
+    )
+    .expect("write disabled chargen document");
+}
+
 pub fn options(source: PathBuf, out: PathBuf) -> BuildOptions {
     BuildOptions {
         source,
