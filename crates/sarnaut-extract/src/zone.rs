@@ -11,7 +11,9 @@ use crate::model::{
     RouteLink, RoutePoint, SpawnEntry, SpawnPlacement, SpawnTableDocument, ZoneSummary,
 };
 use crate::output::OutputWriter;
-use crate::reference::{canonical_id_from_source_path, resource_ref, slug, slug_path};
+use crate::reference::{
+    canonical_id_from_source_path, canonical_zone_slug, resource_ref, slug, slug_path,
+};
 use crate::scan::{find_named_directory, loc_key, sorted_xdb_files, zone_instance_files};
 use crate::validation::SchemaKind;
 use crate::xdb::{
@@ -26,7 +28,7 @@ const PATCH_OBJECTS: &str = "gameMechanics.map.PatchObjects";
 
 pub fn extract_zone(name: &str, options: &ExtractionOptions) -> Result<ZoneSummary> {
     let resolved = resolve_zone(&options.src, name)?;
-    let zone_slug = slug(&resolved.zone);
+    let zone_slug = canonical_zone_slug(&resolved.zone);
     let map_slug = slug(&resolved.map);
     let zone_output = options.out.join("zones").join(&zone_slug);
     let writer = OutputWriter::new(options.dry_run, options.schema_dir.as_deref())?;
@@ -234,7 +236,7 @@ fn load_mobs(src: &Path, zone: &str) -> Result<Vec<(PathBuf, MobDocument)>> {
         }
         let id = canonical_id_from_source_path(&xdb.source.path)
             .with_context(|| format!("build mob ID from {}", xdb.source.path))?;
-        let document = mob_document(root, id, &slug(zone), src, &path, xdb.source);
+        let document = mob_document(root, id, &canonical_zone_slug(zone), src, &path, xdb.source);
         documents.push((path, document));
     }
     Ok(documents)

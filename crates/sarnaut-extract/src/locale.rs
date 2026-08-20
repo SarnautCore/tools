@@ -16,7 +16,7 @@ use crate::encoding::decode;
 use crate::mobkind::{CLASSIC_SERVER_ROOT, zone_source_files};
 use crate::model::{LocaleDocument, LocaleEntry, LocaleOptions, LocaleSummary, Provenance};
 use crate::output::OutputWriter;
-use crate::reference::slug;
+use crate::reference::canonical_zone_slug;
 use crate::scan::{find_named_directory, resolve_href, sort_paths, sorted_xdb_files, strip_txt};
 use crate::validation::SchemaKind;
 use crate::xdb::{descendant_hrefs, parse_document, read_xdb_from};
@@ -27,7 +27,7 @@ pub(crate) const SUPPLEMENTAL_SERVER_ROOT: &str = "classic-server-1-1";
 pub fn extract_locale(zone: &str, options: &LocaleOptions) -> Result<LocaleSummary> {
     let common = &options.common;
     let writer = OutputWriter::new(common.dry_run, common.schema_dir.as_deref())?;
-    let zone_slug = slug(zone);
+    let zone_slug = canonical_zone_slug(zone);
     let mut summary = LocaleSummary {
         zone: zone_slug.clone(),
         language: options.language.clone(),

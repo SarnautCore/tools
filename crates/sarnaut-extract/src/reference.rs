@@ -46,6 +46,16 @@ pub(crate) fn resource_ref(href: &str) -> ResourceRef {
     }
 }
 
+/// Translate source-era zone names at the point where they become public ids.
+/// Most source names are already usable fallbacks, but ADR 0007 names Lightwood
+/// explicitly and keeps that English id stable across source versions.
+pub(crate) fn canonical_zone_slug(value: &str) -> String {
+    match value.to_ascii_lowercase().as_str() {
+        "zoneleague1" | "zone-league1" | "lightwood" => "lightwood".into(),
+        _ => slug(value),
+    }
+}
+
 pub(crate) fn canonical_id_from_href(href: &str) -> Option<String> {
     let path = href.split('#').next()?.trim_start_matches('/');
     canonical_id_from_source_path(path)
@@ -66,18 +76,18 @@ pub(crate) fn canonical_id_from_source_path(path: &str) -> Option<String> {
             Some(format!("item.{category}.{tail}"))
         }
         "World" if parts.get(1) == Some(&"Quests") && parts.len() >= 4 => {
-            let zone = slug(parts[2]);
+            let zone = canonical_zone_slug(parts[2]);
             let tail = quest_slug_path(&parts[3..]);
             Some(format!("quest.{zone}.{tail}"))
         }
         "Characters" | "Creatures" if parts.get(2) == Some(&"Instances") && parts.len() >= 5 => {
             let family = slug(parts[1]);
-            let zone = slug(parts[3]);
+            let zone = canonical_zone_slug(parts[3]);
             let tail = slug_path(&parts[4..]);
             Some(format!("mob.{zone}.{family}.{tail}"))
         }
         "Maps" if parts.get(2) == Some(&"SpawnTables") && parts.len() >= 5 => {
-            let zone = slug(parts[3]);
+            let zone = canonical_zone_slug(parts[3]);
             let tail = slug_path(&parts[4..]);
             Some(format!("spawn.{zone}.table.{tail}"))
         }
@@ -271,6 +281,21 @@ mod tests {
         assert_eq!(
             mobkind_id_from_source_path(path),
             Some("mobkind.characters.kania-male.zone-league1.aidenus".into())
+        );
+    }
+
+    #[test]
+    fn uses_the_canonical_lightwood_zone_id_for_source_zone_league1() {
+        assert_eq!(canonical_zone_slug("ZoneLeague1"), "lightwood");
+        assert_eq!(
+            canonical_id_from_source_path("World/Quests/ZoneLeague1/Quest_01_01/Quest_01_01.xdb"),
+            Some("quest.lightwood.quest-01-01".into())
+        );
+        assert_eq!(
+            canonical_id_from_source_path(
+                "Characters/Kania_male/Instances/ZoneLeague1/Forester.(MobWorld).xdb"
+            ),
+            Some("mob.lightwood.kania-male.forester".into())
         );
     }
 }
