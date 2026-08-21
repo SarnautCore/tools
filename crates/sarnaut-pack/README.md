@@ -20,10 +20,13 @@ A pack is a directory, not an archive:
   tables/items.sptbl
   tables/loot-tables.sptbl
   tables/quests.sptbl
+  tables/quest-scripts.sptbl
+  tables/script-triggers.sptbl
   tables/routes.sptbl
   tables/locale.sptbl
   tables/mob-kinds.sptbl
   tables/level-curve.sptbl
+  tables/map-locators.sptbl
 ```
 
 The first six tables are written even when they hold no rows, so a reader can
@@ -91,6 +94,11 @@ kill-and-loot loop against. `locale` is every string of every language the tree
 supplies (ADR 0007), and `level-curve` is the curated per-level base HP/DPS/XP
 that `mechanics/combat.md` section 7.1 established is absent from the source tree
 and owned by this project.
+
+`map-locators` contains the global positions named by script destinations. Its
+row type is 17 and its row key is exactly `<map_id>/<script_id>`. The compiler
+rejects duplicate keys and every `DestinationLocator` whose pair is absent, so
+the shard never parses source-era map references or guesses a destination.
 
 `mob-kinds` holds the whole creature taxonomy — `MobKind`, `MobClass` and
 `MobQuality` — in one table, each row carrying its **own** declared multipliers

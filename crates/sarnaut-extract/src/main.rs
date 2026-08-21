@@ -109,6 +109,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("quests: {}", summary.quests);
             println!("spawn tables: {}", summary.spawn_tables);
             println!("spawn points: {}", summary.spawn_points);
+            println!("locators: {}", summary.locators);
             println!("mobs: {}", summary.mobs);
             println!("routes: {}", summary.routes);
             println!("unchanged files: {}", summary.unchanged);

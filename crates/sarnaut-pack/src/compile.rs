@@ -30,6 +30,7 @@ pub const TABLE_ROUTES: &str = "routes";
 pub const TABLE_LOCALE: &str = "locale";
 pub const TABLE_MOB_KINDS: &str = "mob-kinds";
 pub const TABLE_LEVEL_CURVE: &str = "level-curve";
+pub const TABLE_MAP_LOCATORS: &str = "map-locators";
 
 /// Maximum container depth of a loot tree, `mechanics/loot.md` section 3's
 /// `MAX_TREE_DEPTH`. The deepest tree in reference data is 2; this is headroom,
@@ -186,6 +187,8 @@ pub fn compile(options: &BuildOptions) -> Result<CompiledPack> {
 
     let spawn_tables = spawn_table_rows(&tree, options.keep_extra)?;
     let placements = placement_rows(&tree, options.keep_extra)?;
+    let map_locators = map_locator_rows(&tree)?;
+    validate_destination_locators(&tree, &map_locators)?;
     let zone_row = zone_row(
         &zone_id,
         &zone_slug,
@@ -243,6 +246,11 @@ pub fn compile(options: &BuildOptions) -> Result<CompiledPack> {
         (TABLE_LOCALE, proto::RowType::Locale, &locale_rows),
         (TABLE_MOB_KINDS, proto::RowType::MobKind, &mob_kinds),
         (TABLE_LEVEL_CURVE, proto::RowType::LevelCurve, &level_curve),
+        (
+            TABLE_MAP_LOCATORS,
+            proto::RowType::MapLocator,
+            &map_locators,
+        ),
     ] {
         if !rows.is_empty() {
             encoded.push(encode(name, row_type, rows)?);
@@ -445,6 +453,139 @@ fn placement_rows(tree: &SourceTree, keep_extra: bool) -> Result<Vec<Row>> {
         bail!("source tree contains no placements");
     }
     Ok(encode_rows(seen))
+}
+
+fn map_locator_rows(tree: &SourceTree) -> Result<Vec<Row>> {
+    let mut seen: BTreeMap<String, proto::MapLocator> = BTreeMap::new();
+    for document in &tree.placement_documents {
+        if document.locators.is_empty() {
+            continue;
+        }
+        if document.map != document.map_resource {
+            bail!(
+                "placement document {} map_resource {:?} differs from map {:?}",
+                document.id,
+                document.map_resource,
+                document.map
+            );
+        }
+        validate_map_component(&document.map_resource)?;
+        for locator in &document.locators {
+            let key = map_locator_key(&document.map_resource, &locator.script_id)?;
+            let position = locator.position;
+            if !position.x.is_finite() || !position.y.is_finite() || !position.z.is_finite() {
+                bail!("map locator {key} has a non-finite position");
+            }
+            let message = proto::MapLocator {
+                map_id: document.map_resource.clone(),
+                script_id: locator.script_id.clone(),
+                position: Some(proto::Vec3 {
+                    x: position.x,
+                    y: position.y,
+                    z: position.z,
+                }),
+            };
+            let encoded_key = map_locator_key(&message.map_id, &message.script_id)?;
+            if encoded_key != key {
+                bail!(
+                    "map locator key {key:?} does not match encoded fields {:?}/{:?}",
+                    message.map_id,
+                    message.script_id
+                );
+            }
+            insert_unique(&mut seen, &key, message, "map locator")?;
+        }
+    }
+    Ok(encode_rows(seen))
+}
+
+fn map_locator_key(map_id: &str, script_id: &str) -> Result<String> {
+    validate_map_component(map_id)?;
+    validate_locator_script_id(script_id)?;
+    Ok(format!("{map_id}/{script_id}"))
+}
+
+fn validate_map_component(map_id: &str) -> Result<()> {
+    let mut segments = map_id.split('-');
+    let valid = !map_id.is_empty()
+        && segments.all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        });
+    if !valid {
+        bail!("map locator map_id {map_id:?} is not a canonical product map slug");
+    }
+    Ok(())
+}
+
+fn validate_locator_script_id(script_id: &str) -> Result<()> {
+    if script_id.is_empty()
+        || script_id.trim() != script_id
+        || script_id
+            .chars()
+            .any(|character| character == '/' || character == '\\' || character.is_control())
+    {
+        bail!(
+            "map locator script_id {script_id:?} is empty or contains whitespace padding, a path separator, or a control character"
+        );
+    }
+    Ok(())
+}
+
+fn validate_destination_locators(tree: &SourceTree, rows: &[Row]) -> Result<()> {
+    let available: BTreeSet<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+    for document in &tree.quest_scripts {
+        for node in document
+            .start_impacts
+            .iter()
+            .chain(&document.trigger_agents)
+        {
+            validate_destination_locator_node(node, &document.id, &available)?;
+        }
+    }
+    for document in &tree.script_triggers {
+        validate_destination_locator_node(&document.root, &document.id, &available)?;
+    }
+    Ok(())
+}
+
+fn validate_destination_locator_node(
+    node: &source::ScriptNodeDocument,
+    row_id: &str,
+    available: &BTreeSet<&str>,
+) -> Result<()> {
+    if node.opcode == "DestinationLocator" {
+        let (map_id, script_id) = destination_locator_identity(node, row_id)?;
+        let key = map_locator_key(map_id, script_id)?;
+        if !available.contains(key.as_str()) {
+            bail!(
+                "script row {row_id}: node {} references absent map locator {key}",
+                node.key
+            );
+        }
+    }
+    for field in &node.fields {
+        validate_destination_locator_value(&field.value, row_id, available)?;
+    }
+    Ok(())
+}
+
+fn validate_destination_locator_value(
+    value: &source::ScriptValueDocument,
+    row_id: &str,
+    available: &BTreeSet<&str>,
+) -> Result<()> {
+    if let Some(node) = value.node.as_deref() {
+        validate_destination_locator_node(node, row_id, available)?;
+    }
+    if let Some(list) = &value.list {
+        for entry in list {
+            validate_destination_locator_value(entry, row_id, available)?;
+        }
+    }
+    Ok(())
 }
 
 fn ability_rows(tree: &SourceTree, locales: &LocaleIndex, keep_extra: bool) -> Result<Vec<Row>> {
@@ -964,49 +1105,7 @@ fn validate_implemented_opcode(node: &source::ScriptNodeDocument, row_id: &str) 
 
     match node.opcode.as_str() {
         "DestinationLocator" => {
-            if names() != ["locator", "yaw"] {
-                return Err(fail_shape("[locator, yaw]"));
-            }
-            let Some(locator) = field("locator")?.node.as_deref() else {
-                bail!(
-                    "script row {row_id}: node {} DestinationLocator.locator is not a MapPointer record",
-                    node.key
-                );
-            };
-            if locator.family != "basic"
-                || locator.opcode != "Struct"
-                || locator
-                    .fields
-                    .iter()
-                    .map(|field| field.name.as_str())
-                    .collect::<Vec<_>>()
-                    != ["map", "scriptID"]
-            {
-                bail!(
-                    "script row {row_id}: node {} DestinationLocator.locator is not canonical MapPointer<Locator>",
-                    node.key
-                );
-            }
-            let map = &locator.fields[0].value;
-            if !map.reference.as_ref().is_some_and(|reference| {
-                reference.row_type.as_deref() == Some("map-resource") && !reference.id.is_empty()
-            }) {
-                bail!(
-                    "script row {row_id}: node {} DestinationLocator.locator.map is not a map-resource reference",
-                    node.key
-                );
-            }
-            if locator.fields[1]
-                .value
-                .text
-                .as_deref()
-                .is_none_or(str::is_empty)
-            {
-                bail!(
-                    "script row {row_id}: node {} DestinationLocator.locator.scriptID is empty or not text",
-                    node.key
-                );
-            }
+            destination_locator_identity(node, row_id)?;
             if !is_integer(field("yaw")?) {
                 return Err(fail_shape("integer yaw"));
             }
@@ -1064,6 +1163,69 @@ fn validate_implemented_opcode(node: &source::ScriptNodeDocument, row_id: &str) 
         _ => {}
     }
     Ok(())
+}
+
+fn destination_locator_identity<'a>(
+    node: &'a source::ScriptNodeDocument,
+    row_id: &str,
+) -> Result<(&'a str, &'a str)> {
+    let names: Vec<&str> = node
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    if names != ["locator", "yaw"] {
+        bail!(
+            "script row {row_id}: node {} DestinationLocator fields {:?}, want [locator, yaw]",
+            node.key,
+            names
+        );
+    }
+    let Some(locator) = node.fields[0].value.node.as_deref() else {
+        bail!(
+            "script row {row_id}: node {} DestinationLocator.locator is not a MapPointer record",
+            node.key
+        );
+    };
+    if locator.family != "basic"
+        || locator.opcode != "Struct"
+        || locator
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>()
+            != ["map", "scriptID"]
+    {
+        bail!(
+            "script row {row_id}: node {} DestinationLocator.locator is not canonical MapPointer<Locator>",
+            node.key
+        );
+    }
+    let Some(map) = locator.fields[0].value.reference.as_ref() else {
+        bail!(
+            "script row {row_id}: node {} DestinationLocator.locator.map is not a content reference",
+            node.key
+        );
+    };
+    if map.row_type.as_deref() != Some("map") || map.id.is_empty() {
+        bail!(
+            "script row {row_id}: node {} DestinationLocator.locator.map is not a canonical product map reference",
+            node.key
+        );
+    }
+    let Some(script_id) = locator.fields[1].value.text.as_deref() else {
+        bail!(
+            "script row {row_id}: node {} DestinationLocator.locator.scriptID is empty or not text",
+            node.key
+        );
+    };
+    if script_id.is_empty() {
+        bail!(
+            "script row {row_id}: node {} DestinationLocator.locator.scriptID is empty or not text",
+            node.key
+        );
+    }
+    Ok((&map.id, script_id))
 }
 
 fn require_scaler_node(

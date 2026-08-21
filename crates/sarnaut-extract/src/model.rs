@@ -36,6 +36,7 @@ pub struct ZoneSummary {
     pub quests: usize,
     pub spawn_tables: usize,
     pub spawn_points: usize,
+    pub locators: usize,
     pub mobs: usize,
     pub routes: usize,
     pub unchanged: usize,
@@ -400,10 +401,19 @@ pub struct PlacementDocument {
     pub kind: String,
     pub zone: String,
     pub map: String,
+    pub map_resource: String,
     pub source_type: String,
     pub placements: Vec<SpawnPlacement>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub locators: Vec<MapLocator>,
     #[serde(rename = "_source")]
     pub source: Provenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapLocator {
+    pub script_id: String,
+    pub position: Position,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,7 +436,7 @@ pub struct SpawnPlacement {
     pub scan_radius: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Position {
     pub x: f64,
     pub y: f64,

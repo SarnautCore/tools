@@ -35,6 +35,7 @@ enum RowType {
   ROW_TYPE_LEVEL_CURVE = 14;
   ROW_TYPE_QUEST_SCRIPT = 15;
   ROW_TYPE_SCRIPT_TRIGGER = 16;
+  ROW_TYPE_MAP_LOCATOR = 17;
 }
 
 // Vec3 is a world-space position. Z is the vertical axis.
@@ -631,11 +632,14 @@ message Decimal {
   sint32 scale = 2;
 }
 
-// ContentRef is a resolved content reference: a canonical id and a row-type
-// slug, never a source href. The extractor resolves hrefs; nothing downstream
-// sees an xpointer (ADR 0036).
+// ContentRef is a resolved content reference: a product id and a row-type
+// slug, never a source href. Most ids are dotted canonical content ids. A
+// row_type of `map` carries the bare canonical map slug so DestinationLocator
+// and MapLocator use the same key. The extractor resolves hrefs; nothing
+// downstream sees an xpointer (ADR 0036).
 message ContentRef {
-  // Canonical id, for example `trigger.inst-league1.il-quest-spells.rat-killer`.
+  // Product id, for example `trigger.inst-league1.il-quest-spells.rat-killer`
+  // or `inst-league-start` when row_type is `map`.
   string id = 1;
   // Row-type slug the id is expected to resolve against, for example
   // `trigger`, `spawn-table`, `mob`, `quest-count-id`. Empty when the target
@@ -723,4 +727,17 @@ message ScriptTrigger {
   // The document root: family `trigger`, opcode `TriggerResource`, with the
   // authored `effects` list as its children.
   ScriptNode root = 2;
+}
+
+// MapLocator is one named global-frame point. Script impacts resolve the
+// composite (map_id, script_id); script_id alone is not globally unique. The
+// .sptbl row key is exactly `<map_id>/<script_id>`. Both components are
+// non-empty and exclude slash, backslash and control characters.
+message MapLocator {
+  // Canonical product map identity, for example `inst-league-start`.
+  string map_id = 1;
+  // Authored script hook name, verbatim.
+  string script_id = 2;
+  // Global world position after the M3-08 coordinate-frame correction.
+  Vec3 position = 3;
 }

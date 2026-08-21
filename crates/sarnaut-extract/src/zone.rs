@@ -6,9 +6,10 @@ use anyhow::{Context, Result, bail};
 use roxmltree::Node;
 
 use crate::model::{
-    ExtractionOptions, LocRefs, MobDocument, PlacementDocument, Provenance, QuestDocument,
-    QuestObjective, QuestPrerequisite, QuestRewards, ResourceRef, RewardItem, RouteDocument,
-    RouteLink, RoutePoint, SpawnEntry, SpawnPlacement, SpawnTableDocument, ZoneSummary,
+    ExtractionOptions, LocRefs, MapLocator, MobDocument, PlacementDocument, Provenance,
+    QuestDocument, QuestObjective, QuestPrerequisite, QuestRewards, ResourceRef, RewardItem,
+    RouteDocument, RouteLink, RoutePoint, SpawnEntry, SpawnPlacement, SpawnTableDocument,
+    ZoneSummary,
 };
 use crate::objective::derive_objective_id;
 use crate::output::OutputWriter;
@@ -115,6 +116,7 @@ pub fn extract_zone(name: &str, options: &ExtractionOptions) -> Result<ZoneSumma
         }
     }
 
+    let mut locator_sources = BTreeMap::new();
     for path in server_object_files(&resolved.map_dir)? {
         let xdb = read_xdb(&path, &options.src)?;
         let xml = parse_document(&xdb.text, &path)?;
@@ -130,29 +132,45 @@ pub fn extract_zone(name: &str, options: &ExtractionOptions) -> Result<ZoneSumma
         let borrowed: Vec<_> = parts.iter().map(String::as_str).collect();
         let source_slug = slug_path(&borrowed);
         let origin = tile_origin(&resolved.map_dir, &path)?;
-        let (placements, routes) = placements_and_routes(
+        let (placements, routes, locators) = placements_routes_and_locators(
             root,
             &zone_slug,
             &map_slug,
             &source_slug,
             &xdb.source,
             origin,
-        );
-        if !placements.is_empty() {
+        )?;
+        for locator in &locators {
+            if let Some(previous) =
+                locator_sources.insert(locator.script_id.clone(), xdb.source.path.clone())
+            {
+                bail!(
+                    "map {} defines locator {:?} in both {} and {}",
+                    map_slug,
+                    locator.script_id,
+                    previous,
+                    xdb.source.path
+                );
+            }
+        }
+        if !placements.is_empty() || !locators.is_empty() {
             let document = PlacementDocument {
                 schema_version: 1,
                 id: format!("spawn.{zone_slug}.placements.{source_slug}"),
                 kind: "placements".into(),
                 zone: format!("zone.{zone_slug}"),
                 map: map_slug.clone(),
+                map_resource: map_slug.clone(),
                 source_type: root.tag_name().name().to_owned(),
                 placements,
+                locators,
                 source: xdb.source.clone(),
             };
             let output = zone_output
                 .join("spawns/placements")
                 .join(format!("{source_slug}.yaml"));
             summary.spawn_points += document.placements.len();
+            summary.locators += document.locators.len();
             summary.unchanged +=
                 usize::from(writer.write(&output, SchemaKind::Spawn, &document)?);
         }
@@ -558,22 +576,40 @@ fn spawn_table_document(
     }
 }
 
-fn placements_and_routes(
+fn placements_routes_and_locators(
     root: Node<'_, '_>,
     zone: &str,
     map: &str,
     source_slug: &str,
     source: &Provenance,
     origin: TileOrigin,
-) -> (Vec<SpawnPlacement>, Vec<RouteDocument>) {
+) -> Result<(Vec<SpawnPlacement>, Vec<RouteDocument>, Vec<MapLocator>)> {
     let mut placements = Vec::new();
     let mut routes = Vec::new();
+    let mut locators = Vec::new();
     let Some(objects) = child(root, "objects") else {
-        return (placements, routes);
+        return Ok((placements, routes, locators));
     };
     for object in children(objects, "Item") {
         let object_type = object.attribute("type").unwrap_or_default();
-        if object_type.ends_with("SpawnLocus") {
+        if object_type == "gameMechanics.map.Locator" {
+            let script_id = text(object, "scriptID")
+                .filter(|value| !value.trim().is_empty())
+                .with_context(|| format!("{} contains a Locator with no scriptID", source.path))?;
+            let local_position =
+                child(object, "position")
+                    .and_then(position)
+                    .with_context(|| {
+                        format!(
+                            "{} locator {script_id:?} has no valid position",
+                            source.path
+                        )
+                    })?;
+            locators.push(MapLocator {
+                script_id,
+                position: origin.apply(local_position),
+            });
+        } else if object_type.ends_with("SpawnLocus") {
             let Some(table_href) = href(object, "spawnTable") else {
                 continue;
             };
@@ -627,7 +663,18 @@ fn placements_and_routes(
             );
         }
     }
-    (placements, routes)
+    locators.sort_by(|left, right| left.script_id.as_bytes().cmp(right.script_id.as_bytes()));
+    if let Some(pair) = locators
+        .windows(2)
+        .find(|pair| pair[0].script_id == pair[1].script_id)
+    {
+        bail!(
+            "{} defines locator {:?} more than once",
+            source.path,
+            pair[0].script_id
+        );
+    }
+    Ok((placements, routes, locators))
 }
 
 struct PlacementContext<'a> {
@@ -846,7 +893,7 @@ mod tests {
             &source
                 .path()
                 .join("Maps/TestMap/000_000/0_0_ServerObjects.xdb"),
-            r#"<gameMechanics.map.PatchObjects><objects><Item type="gameMechanics.map.spawn.SpawnLocus"><scanRadius>10</scanRadius><spawnTable href="/Maps/TestMap/SpawnTables/TestZone/Rats.(MobSpawnTable).xdb#x"/><places><Item type="gameMechanics.map.spawn.patrol.SpawnPlacePatrol"><points><Item><coords x="1" y="2" z="3"/></Item><Item><coords x="4" y="5" z="6"/></Item></points><links><Item><first>0</first><second>1</second><weight>1</weight><transferenceType type="Walk"><isFly>false</isFly></transferenceType></Item></links></Item></places></Item></objects></gameMechanics.map.PatchObjects>"#,
+            r#"<gameMechanics.map.PatchObjects><objects><Item type="gameMechanics.map.spawn.SpawnLocus"><scanRadius>10</scanRadius><spawnTable href="/Maps/TestMap/SpawnTables/TestZone/Rats.(MobSpawnTable).xdb#x"/><places><Item type="gameMechanics.map.spawn.patrol.SpawnPlacePatrol"><points><Item><coords x="1" y="2" z="3"/></Item><Item><coords x="4" y="5" z="6"/></Item></points><links><Item><first>0</first><second>1</second><weight>1</weight><transferenceType type="Walk"><isFly>false</isFly></transferenceType></Item></links></Item></places></Item><Item type="gameMechanics.map.Locator"><scriptID>Zulu</scriptID><position x="7" y="8" z="9"/></Item><Item type="gameMechanics.map.Locator"><scriptID>Alpha</scriptID><position x="4" y="5" z="6"/></Item></objects></gameMechanics.map.PatchObjects>"#,
         );
 
         let summary = extract_zone(
@@ -863,6 +910,7 @@ mod tests {
         assert_eq!(summary.mobs, 1);
         assert_eq!(summary.spawn_tables, 1);
         assert_eq!(summary.spawn_points, 1);
+        assert_eq!(summary.locators, 2);
         assert_eq!(summary.routes, 1);
         let quest =
             fs::read_to_string(output.path().join("zones/test-zone/quests/first.yaml")).unwrap();
@@ -892,6 +940,20 @@ mod tests {
         assert!(
             mob.contains("name: Characters/Human/Instances/TestZone/Guide"),
             "{mob}"
+        );
+        let placements = fs::read_to_string(
+            output
+                .path()
+                .join("zones/test-zone/spawns/placements/000-000.0-0-server-objects.yaml"),
+        )
+        .unwrap();
+        assert!(
+            placements.contains("map_resource: test-map"),
+            "{placements}"
+        );
+        assert!(
+            placements.find("script_id: Alpha") < placements.find("script_id: Zulu"),
+            "{placements}"
         );
     }
 
@@ -949,6 +1011,62 @@ mod tests {
         });
         assert!(after_wrap.y > before_wrap.y);
         assert!(after_wrap.y - before_wrap.y < 2.0);
+    }
+
+    #[test]
+    #[ignore = "requires the private Allods 1.1 source tree"]
+    fn instleague1_locator_source_census_is_216_unique_rows() {
+        let source_root = std::env::var_os("SARNAUT_CLASSIC_SOURCE")
+            .map(PathBuf::from)
+            .expect("set SARNAUT_CLASSIC_SOURCE to the extracted 1.1 data root");
+        let resolved = resolve_zone(&source_root, "InstLeague1").unwrap();
+        let mut locators = BTreeMap::new();
+
+        for path in server_object_files(&resolved.map_dir).unwrap() {
+            let xdb = read_xdb(&path, &source_root).unwrap();
+            let xml = parse_document(&xdb.text, &path).unwrap();
+            let root = xml.root_element();
+            if root.tag_name().name() != PATCH_OBJECTS {
+                continue;
+            }
+            let origin = tile_origin(&resolved.map_dir, &path).unwrap();
+            let (_, _, extracted) = placements_routes_and_locators(
+                root,
+                "inst-league1",
+                "inst-league-start",
+                "source",
+                &xdb.source,
+                origin,
+            )
+            .unwrap();
+            for locator in extracted {
+                assert!(
+                    locators
+                        .insert(locator.script_id.clone(), locator.position)
+                        .is_none(),
+                    "duplicate locator {}",
+                    locator.script_id
+                );
+            }
+        }
+
+        assert_eq!(locators.len(), 216, "source census changed");
+        assert_eq!(
+            locators.get("DemonSpawn4").copied(),
+            Some(crate::model::Position {
+                x: 318.3686,
+                y: 5871.289,
+                z: 32.2894,
+            })
+        );
+        assert_eq!(
+            locators.get("Firewall").copied(),
+            Some(crate::model::Position {
+                x: 306.745,
+                y: 5830.664,
+                z: 32.2787,
+            })
+        );
     }
 
     #[test]
