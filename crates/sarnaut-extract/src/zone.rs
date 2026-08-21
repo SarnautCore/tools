@@ -737,6 +737,7 @@ fn server_object_files(map_root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 const TILE_PITCH: f64 = 256.0;
+const POSITION_PRECISION: f64 = 1_000_000_000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TileOrigin {
@@ -747,11 +748,15 @@ struct TileOrigin {
 impl TileOrigin {
     fn apply(self, local: crate::model::Position) -> crate::model::Position {
         crate::model::Position {
-            x: self.x + local.x,
-            y: self.y + local.y,
+            x: rounded_position(self.x + local.x),
+            y: rounded_position(self.y + local.y),
             z: local.z,
         }
     }
+}
+
+fn rounded_position(value: f64) -> f64 {
+    (value * POSITION_PRECISION).round() / POSITION_PRECISION
 }
 
 /// Parses ADR 0038's `SX_SY/R_C_ServerObjects.xdb` naming contract. The first

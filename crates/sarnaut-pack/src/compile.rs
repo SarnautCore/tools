@@ -610,6 +610,28 @@ fn quest_rows(tree: &SourceTree, locales: &LocaleIndex, keep_extra: bool) -> Res
     for document in &tree.quests {
         let mut objectives = Vec::with_capacity(document.objectives.len());
         for objective in &document.objectives {
+            let expected_prefix = format!("{}.objective.", document.id);
+            let digest = objective
+                .objective_id
+                .strip_prefix(&expected_prefix)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "quest {} objective id {} does not belong to its quest",
+                        document.id,
+                        objective.objective_id
+                    )
+                })?;
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                bail!(
+                    "quest {} objective id {} has no 64-character lowercase hex digest",
+                    document.id,
+                    objective.objective_id
+                );
+            }
             if let Some(previous_quest) =
                 objective_ids.insert(objective.objective_id.clone(), document.id.clone())
             {
