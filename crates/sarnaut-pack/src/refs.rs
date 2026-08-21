@@ -235,6 +235,7 @@ pub struct Universe {
     pub factions: BTreeSet<String>,
     pub mob_kinds: BTreeSet<String>,
     pub abilities: BTreeSet<String>,
+    pub native_actions: BTreeSet<String>,
     pub items: BTreeSet<String>,
     pub loot_tables: BTreeSet<String>,
     pub level_curves: BTreeSet<String>,
@@ -265,6 +266,7 @@ impl Universe {
             factions: ids(tree.factions.iter().map(|document| &document.id)),
             mob_kinds: ids(tree.mob_kinds.iter().map(|document| &document.id)),
             abilities: ids(tree.abilities.iter().map(|document| &document.id)),
+            native_actions: ids(tree.native_actions.iter().map(|document| &document.id)),
             items: ids(tree.items.iter().map(|document| &document.id)),
             loot_tables: ids(tree.loot_tables.iter().map(|document| &document.id)),
             level_curves: ids(tree.level_curves.iter().map(|document| &document.id)),
@@ -380,6 +382,18 @@ pub fn check(tree: &SourceTree, universe: &Universe, locales: &LocaleIndex) -> R
 
     for document in &tree.abilities {
         pass.locale(&document.id, &document.loc_ref, &document.source, locales);
+    }
+
+    for document in &tree.native_actions {
+        let mut references = Vec::new();
+        for node in document
+            .caster_conditions
+            .iter()
+            .chain(&document.target_impacts)
+        {
+            crate::source::collect_script_refs(node, &mut references);
+        }
+        pass.script_refs(&document.id, &references);
     }
 
     for document in &tree.routes {
@@ -522,6 +536,14 @@ pub fn check(tree: &SourceTree, universe: &Universe, locales: &LocaleIndex) -> R
             pass.one("chargen -> ability", &document.id, ability, |u| {
                 &u.abilities
             });
+        }
+        for action in &document.starting_actions {
+            pass.one(
+                "chargen -> native action",
+                &document.id,
+                &action.action_id,
+                |u| &u.native_actions,
+            );
         }
         for quest in &document.starting_quests {
             pass.one("chargen -> quest", &document.id, quest, |u| &u.quests);
