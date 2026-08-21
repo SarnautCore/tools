@@ -76,7 +76,8 @@ starter:
 finisher:
   id: mob.harbour-watch.gull
 objectives:
-  - kind: quest-count-kill
+  - objective_id: quest.harbour-watch.curated.objective.2222222222222222222222222222222222222222222222222222222222222222
+    kind: quest-count-kill
     limit: 3
     show_count: true
     targets:

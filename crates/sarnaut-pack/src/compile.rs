@@ -606,9 +606,19 @@ fn mob_rows(tree: &SourceTree, locales: &LocaleIndex, keep_extra: bool) -> Resul
 /// would hand the shard a quest that looks completable and is not.
 fn quest_rows(tree: &SourceTree, locales: &LocaleIndex, keep_extra: bool) -> Result<Vec<Row>> {
     let mut seen: BTreeMap<String, proto::Quest> = BTreeMap::new();
+    let mut objective_ids = BTreeMap::new();
     for document in &tree.quests {
         let mut objectives = Vec::with_capacity(document.objectives.len());
         for objective in &document.objectives {
+            if let Some(previous_quest) =
+                objective_ids.insert(objective.objective_id.clone(), document.id.clone())
+            {
+                bail!(
+                    "quest objective id {} collides between {previous_quest} and {}",
+                    objective.objective_id,
+                    document.id
+                );
+            }
             let kind = match objective.kind.as_str() {
                 "quest-count-kill" => proto::QuestObjectiveKind::CountKill,
                 "quest-count-item" => proto::QuestObjectiveKind::CountItem,
@@ -626,6 +636,7 @@ fn quest_rows(tree: &SourceTree, locales: &LocaleIndex, keep_extra: bool) -> Res
                 );
             }
             objectives.push(proto::QuestObjective {
+                objective_id: objective.objective_id.clone(),
                 kind: kind as i32,
                 limit,
                 target_ids: objective

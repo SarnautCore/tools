@@ -520,8 +520,8 @@ enum QuestObjectiveKind {
   QUEST_OBJECTIVE_KIND_COUNT_SPECIAL = 3;
 }
 
-// QuestObjective is one countable goal. Position in `Quest.objectives` is the
-// counter index (quests.md rule 7.5).
+// QuestObjective is one countable goal. objective_id is durable across source
+// counter reordering; position remains presentation order only.
 message QuestObjective {
   QuestObjectiveKind kind = 1;
   // Inclusive target count. Zero is satisfied on creation (rule 5.5.8).
@@ -536,6 +536,10 @@ message QuestObjective {
   string counter_key = 6;
   // Destroy the tracked items when the quest is abandoned (rule 5.5.5).
   bool remove_on_abandon = 7;
+  // Quest-scoped stable identity: `<quest-id>.objective.<BLAKE3 hex>`. The
+  // extractor hashes the source QuestCountId when one exists, otherwise the
+  // counter kind, custom-name reference and target set.
+  string objective_id = 8;
 }
 
 // QuestPrerequisite is one gate on offering a quest (quests.md rule 5.3.3).
