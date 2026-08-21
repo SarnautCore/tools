@@ -24,6 +24,8 @@ pub const TABLE_CHARGEN: &str = "chargen";
 pub const TABLE_ITEMS: &str = "items";
 pub const TABLE_LOOT_TABLES: &str = "loot-tables";
 pub const TABLE_QUESTS: &str = "quests";
+pub const TABLE_QUEST_SCRIPTS: &str = "quest-scripts";
+pub const TABLE_SCRIPT_TRIGGERS: &str = "script-triggers";
 pub const TABLE_ROUTES: &str = "routes";
 pub const TABLE_LOCALE: &str = "locale";
 pub const TABLE_MOB_KINDS: &str = "mob-kinds";
@@ -43,6 +45,17 @@ const DEFAULT_HP_MOD: f32 = 1.0;
 /// A spawn schedule of `time-never` marks an authored object as inert. The
 /// shard still sees the row; the resolver skips it.
 pub const SPAWN_TIME_NEVER: &str = "time-never";
+
+/// Maximum nesting depth of a script tree (ADR 0036: the pack validator
+/// rejects excessive nesting). The deepest extracted tutorial tree is 9 levels;
+/// this is headroom, and rejecting past it at compile time means the shard
+/// never defends a recursive walk against authored content.
+const MAX_SCRIPT_NODE_DEPTH: u32 = 32;
+
+/// Maximum node count of one script row (ADR 0036: the pack validator rejects
+/// an excessive node count). The largest extracted tutorial surface is well
+/// under a thousand nodes.
+const MAX_SCRIPT_ROW_NODES: usize = 4096;
 
 /// Where an entering player is placed, when the caller pins it explicitly.
 #[derive(Clone, Copy, Debug)]
@@ -189,6 +202,8 @@ pub fn compile(options: &BuildOptions) -> Result<CompiledPack> {
     let items = item_rows(&tree, &locales, options.keep_extra)?;
     let loot_tables = loot_table_rows(&tree, options.keep_extra)?;
     let quests = quest_rows(&tree, &locales, options.keep_extra)?;
+    let quest_scripts = quest_script_rows(&tree)?;
+    let script_triggers = script_trigger_rows(&tree)?;
     let routes = route_rows(&tree, options.keep_extra)?;
     let locale_rows = locale_rows(&tree, options.keep_extra)?;
 
@@ -214,6 +229,16 @@ pub fn compile(options: &BuildOptions) -> Result<CompiledPack> {
         (TABLE_ITEMS, proto::RowType::Item, &items),
         (TABLE_LOOT_TABLES, proto::RowType::LootTable, &loot_tables),
         (TABLE_QUESTS, proto::RowType::Quest, &quests),
+        (
+            TABLE_QUEST_SCRIPTS,
+            proto::RowType::QuestScript,
+            &quest_scripts,
+        ),
+        (
+            TABLE_SCRIPT_TRIGGERS,
+            proto::RowType::ScriptTrigger,
+            &script_triggers,
+        ),
         (TABLE_ROUTES, proto::RowType::Route, &routes),
         (TABLE_LOCALE, proto::RowType::Locale, &locale_rows),
         (TABLE_MOB_KINDS, proto::RowType::MobKind, &mob_kinds),
@@ -669,6 +694,265 @@ fn reward_items(items: &[source::QuestRewardItemDocument]) -> Vec<proto::QuestRe
             hidden: reward.hidden,
         })
         .collect()
+}
+
+/// Compiles the quest-script rows (ADR 0036).
+///
+/// The compiler has no opcode allow-list: it validates structure and preserves
+/// all three coverage tiers. Whether a node executes is the `tier` field's
+/// decision at evaluation, not this function's.
+fn quest_script_rows(tree: &SourceTree) -> Result<Vec<Row>> {
+    let mut seen: BTreeMap<String, proto::QuestScript> = BTreeMap::new();
+    for document in &tree.quest_scripts {
+        let mut check = ScriptRowCheck::new(&document.id);
+        let mut counters = Vec::with_capacity(document.counters.len());
+        let mut counter_ids: BTreeSet<&str> = BTreeSet::new();
+        let mut objective_ids: BTreeSet<&str> = BTreeSet::new();
+        for counter in &document.counters {
+            if counter.count_id.is_empty() {
+                bail!("quest script {}: a counter names no count_id", document.id);
+            }
+            if !counter_ids.insert(counter.count_id.as_str()) {
+                bail!(
+                    "quest script {}: count id {} is bound twice",
+                    document.id,
+                    counter.count_id
+                );
+            }
+            let objective_digest = counter
+                .objective_id
+                .strip_prefix(&format!("{}.objective.", document.quest));
+            if !objective_digest.is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            }) {
+                bail!(
+                    "quest script {}: count id {} has invalid objective_id {:?}; want {}.objective.<64 lowercase hex>",
+                    document.id,
+                    counter.count_id,
+                    counter.objective_id,
+                    document.quest
+                );
+            }
+            if !objective_ids.insert(counter.objective_id.as_str()) {
+                bail!(
+                    "quest script {}: objective id {} is bound twice",
+                    document.id,
+                    counter.objective_id
+                );
+            }
+            counters.push(proto::QuestCounterBinding {
+                count_id: counter.count_id.clone(),
+                objective_index: counter.objective,
+                objective_id: counter.objective_id.clone(),
+            });
+        }
+        let message = proto::QuestScript {
+            id: document.id.clone(),
+            quest_id: document.quest.clone(),
+            counters,
+            start_impacts: document
+                .start_impacts
+                .iter()
+                .map(|node| script_node(node, &mut check, 1))
+                .collect::<Result<Vec<_>>>()?,
+            trigger_agents: document
+                .trigger_agents
+                .iter()
+                .map(|node| script_node(node, &mut check, 1))
+                .collect::<Result<Vec<_>>>()?,
+        };
+        insert_unique(&mut seen, &document.id, message, "quest script")?;
+    }
+    Ok(encode_rows(seen))
+}
+
+/// Compiles the script-trigger rows: one shared TriggerResource tree each.
+fn script_trigger_rows(tree: &SourceTree) -> Result<Vec<Row>> {
+    let mut seen: BTreeMap<String, proto::ScriptTrigger> = BTreeMap::new();
+    for document in &tree.script_triggers {
+        let mut check = ScriptRowCheck::new(&document.id);
+        let message = proto::ScriptTrigger {
+            id: document.id.clone(),
+            root: Some(script_node(&document.root, &mut check, 1)?),
+        };
+        insert_unique(&mut seen, &document.id, message, "script trigger")?;
+    }
+    Ok(encode_rows(seen))
+}
+
+/// Per-row state for the structural rules ADR 0036 names: duplicate node keys
+/// and an excessive node count are rejected across the whole row, not per tree.
+struct ScriptRowCheck<'a> {
+    row_id: &'a str,
+    node_keys: BTreeSet<String>,
+    nodes: usize,
+}
+
+impl<'a> ScriptRowCheck<'a> {
+    fn new(row_id: &'a str) -> Self {
+        Self {
+            row_id,
+            node_keys: BTreeSet::new(),
+            nodes: 0,
+        }
+    }
+}
+
+/// Converts one authored script node, recursively, applying ADR 0036's
+/// validator rules: a known tier, unique bytewise-sorted field names, a valid
+/// value union, unique node keys, bounded depth and a bounded node count. It
+/// deliberately does **not** reject an unfamiliar opcode.
+fn script_node(
+    document: &source::ScriptNodeDocument,
+    check: &mut ScriptRowCheck<'_>,
+    depth: u32,
+) -> Result<proto::ScriptNode> {
+    if depth > MAX_SCRIPT_NODE_DEPTH {
+        bail!(
+            "script row {}: node {} nests {depth} levels deep, past the {MAX_SCRIPT_NODE_DEPTH} ADR 0036 allows",
+            check.row_id,
+            document.key
+        );
+    }
+    check.nodes += 1;
+    if check.nodes > MAX_SCRIPT_ROW_NODES {
+        bail!(
+            "script row {}: more than {MAX_SCRIPT_ROW_NODES} nodes in one row",
+            check.row_id
+        );
+    }
+    if document.key.is_empty() {
+        bail!(
+            "script row {}: a {} node carries no node key",
+            check.row_id,
+            document.opcode
+        );
+    }
+    if !check.node_keys.insert(document.key.clone()) {
+        bail!(
+            "script row {}: node key {} appears twice",
+            check.row_id,
+            document.key
+        );
+    }
+    if document.opcode.is_empty() {
+        bail!(
+            "script row {}: node {} carries no opcode",
+            check.row_id,
+            document.key
+        );
+    }
+    let tier = match document.tier.as_str() {
+        "implemented" => proto::CoverageTier::Implemented,
+        "inert-and-counted" => proto::CoverageTier::Inert,
+        "refused" => proto::CoverageTier::Refused,
+        other => bail!(
+            "script row {}: node {} declares tier {other:?}, which ADR 0036 does not define",
+            check.row_id,
+            document.key
+        ),
+    };
+
+    let mut fields = Vec::with_capacity(document.fields.len());
+    for (index, field) in document.fields.iter().enumerate() {
+        if field.name.is_empty() {
+            bail!(
+                "script row {}: node {} field {index} has no name",
+                check.row_id,
+                document.key
+            );
+        }
+        if let Some(previous) = document.fields.get(index.wrapping_sub(1))
+            && index > 0
+            && previous.name.as_bytes() >= field.name.as_bytes()
+        {
+            bail!(
+                "script row {}: node {} fields are not sorted bytewise by unique name: {:?} then {:?}",
+                check.row_id,
+                document.key,
+                previous.name,
+                field.name
+            );
+        }
+        fields.push(proto::ScriptField {
+            name: field.name.clone(),
+            value: Some(script_value(&field.value, check, &document.key, depth)?),
+        });
+    }
+    Ok(proto::ScriptNode {
+        node_key: document.key.clone(),
+        family: document.family.clone(),
+        opcode: document.opcode.clone(),
+        tier: tier as i32,
+        fields,
+    })
+}
+
+/// Converts one script value, enforcing that exactly one union member is set.
+fn script_value(
+    document: &source::ScriptValueDocument,
+    check: &mut ScriptRowCheck<'_>,
+    node_key: &str,
+    depth: u32,
+) -> Result<proto::ScriptValue> {
+    use proto::script_value::Value;
+
+    let mut members = 0;
+    members += usize::from(document.integer.is_some());
+    members += usize::from(document.decimal.is_some());
+    members += usize::from(document.boolean.is_some());
+    members += usize::from(document.text.is_some());
+    members += usize::from(document.reference.is_some());
+    members += usize::from(document.duration_ms.is_some());
+    members += usize::from(document.node.is_some());
+    members += usize::from(document.list.is_some());
+    if members != 1 {
+        bail!(
+            "script row {}: a value under node {node_key} sets {members} union members, want exactly one",
+            check.row_id
+        );
+    }
+
+    let value = if let Some(integer) = document.integer {
+        Value::Integer(integer)
+    } else if let Some(decimal) = document.decimal {
+        Value::Decimal(proto::Decimal {
+            mantissa: decimal.mantissa,
+            scale: decimal.scale,
+        })
+    } else if let Some(boolean) = document.boolean {
+        Value::Boolean(boolean)
+    } else if let Some(text) = &document.text {
+        Value::Text(text.clone())
+    } else if let Some(reference) = &document.reference {
+        if reference.id.is_empty() {
+            bail!(
+                "script row {}: a reference under node {node_key} names no id",
+                check.row_id
+            );
+        }
+        Value::Reference(proto::ContentRef {
+            id: reference.id.clone(),
+            row_type: reference.row_type.clone().unwrap_or_default(),
+        })
+    } else if let Some(duration) = document.duration_ms {
+        Value::DurationMs(duration)
+    } else if let Some(node) = &document.node {
+        Value::Node(script_node(node, check, depth + 1)?)
+    } else if let Some(list) = &document.list {
+        Value::List(proto::ScriptValueList {
+            values: list
+                .iter()
+                .map(|entry| script_value(entry, check, node_key, depth))
+                .collect::<Result<Vec<_>>>()?,
+        })
+    } else {
+        unreachable!("exactly one member was counted above")
+    };
+    Ok(proto::ScriptValue { value: Some(value) })
 }
 
 /// Reads a boolean out of the untyped passthrough.

@@ -16,10 +16,12 @@ pub enum SchemaKind {
     Faction,
     LootTable,
     Locale,
+    QuestScript,
+    ScriptTrigger,
 }
 
 impl SchemaKind {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::Item,
         Self::Quest,
         Self::Spawn,
@@ -28,6 +30,8 @@ impl SchemaKind {
         Self::Faction,
         Self::LootTable,
         Self::Locale,
+        Self::QuestScript,
+        Self::ScriptTrigger,
     ];
 
     fn file_name(self) -> &'static str {
@@ -40,6 +44,8 @@ impl SchemaKind {
             Self::Faction => "faction.schema.json",
             Self::LootTable => "loot-table.schema.json",
             Self::Locale => "locale.schema.json",
+            Self::QuestScript => "quest-script.schema.json",
+            Self::ScriptTrigger => "script-trigger.schema.json",
         }
     }
 }

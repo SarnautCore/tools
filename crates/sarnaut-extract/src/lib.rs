@@ -7,11 +7,14 @@ mod locale;
 mod loot;
 mod mobkind;
 mod model;
+mod objective;
 mod output;
 mod reference;
 mod scan;
+mod script;
 #[cfg(test)]
 mod testing;
+mod tiers;
 mod validation;
 mod xdb;
 mod zone;
@@ -26,6 +29,7 @@ pub use model::{
     ExtractionOptions, ItemSummary, LocaleOptions, LocaleSummary, LootSummary, MobKindSummary,
     ZoneSummary,
 };
+pub use script::{ScriptSummary, extract_scripts};
 pub use validation::{SchemaKind, SchemaValidator};
 pub use zone::extract_zone;
 

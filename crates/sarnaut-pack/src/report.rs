@@ -28,7 +28,76 @@ pub struct BuildReport {
     pub overlay_conflicts: Vec<String>,
     pub deleted_documents: Vec<String>,
     pub selection: SelectionReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scripts: Option<ScriptCensusReport>,
     pub references: ReferenceSummary,
+}
+
+/// ADR 0036's per-tier node counts over every script row in the pack. CI diffs
+/// these against the interpreter's checked-in tier table, which is what makes
+/// widening coverage a reviewable diff rather than a quiet behaviour change.
+#[derive(Debug, Serialize)]
+pub struct ScriptCensusReport {
+    pub quest_scripts: usize,
+    pub script_triggers: usize,
+    pub nodes: usize,
+    /// Nodes per opcode, by tier.
+    pub implemented: std::collections::BTreeMap<String, usize>,
+    pub inert_and_counted: std::collections::BTreeMap<String, usize>,
+    pub refused: std::collections::BTreeMap<String, usize>,
+}
+
+impl ScriptCensusReport {
+    fn of(tree: &SourceTree) -> Option<Self> {
+        if tree.quest_scripts.is_empty() && tree.script_triggers.is_empty() {
+            return None;
+        }
+        let mut census = Self {
+            quest_scripts: tree.quest_scripts.len(),
+            script_triggers: tree.script_triggers.len(),
+            nodes: 0,
+            implemented: Default::default(),
+            inert_and_counted: Default::default(),
+            refused: Default::default(),
+        };
+        for document in &tree.quest_scripts {
+            for node in document
+                .start_impacts
+                .iter()
+                .chain(&document.trigger_agents)
+            {
+                census.count(node);
+            }
+        }
+        for document in &tree.script_triggers {
+            census.count(&document.root);
+        }
+        Some(census)
+    }
+
+    fn count(&mut self, node: &crate::source::ScriptNodeDocument) {
+        self.nodes += 1;
+        let bucket = match node.tier.as_str() {
+            "implemented" => &mut self.implemented,
+            "inert-and-counted" => &mut self.inert_and_counted,
+            _ => &mut self.refused,
+        };
+        *bucket.entry(node.opcode.clone()).or_insert(0) += 1;
+        for field in &node.fields {
+            self.count_value(&field.value);
+        }
+    }
+
+    fn count_value(&mut self, value: &crate::source::ScriptValueDocument) {
+        if let Some(node) = &value.node {
+            self.count(node);
+        }
+        if let Some(list) = &value.list {
+            for entry in list {
+                self.count_value(entry);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -127,6 +196,7 @@ impl BuildReport {
                 loot_tables_unreachable: tree.unreachable_loot_tables,
                 locale_keys,
             },
+            scripts: ScriptCensusReport::of(tree),
             references: ReferenceSummary {
                 resolved: references.resolved,
                 dangling: references
@@ -149,7 +219,7 @@ impl BuildReport {
                     .iter()
                     .map(|entry| {
                         format!(
-                            "{}: {} references {}, an interactive object this pack models no row for",
+                            "{}: {} references {}, which this pack models no row for",
                             entry.class, entry.referencer, entry.target
                         )
                     })
@@ -157,9 +227,7 @@ impl BuildReport {
                 locale_gaps: references
                     .locale_gaps
                     .iter()
-                    .map(|gap| {
-                        format!("{} ({}) wants {}", gap.referencer, gap.field, gap.key)
-                    })
+                    .map(|gap| format!("{} ({}) wants {}", gap.referencer, gap.field, gap.key))
                     .collect(),
                 locale_gaps_by_namespace: crate::refs::gaps_by_namespace(references),
             },

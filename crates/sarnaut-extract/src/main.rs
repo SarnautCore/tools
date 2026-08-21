@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use sarnaut_extract::{
     ExtractionOptions, LocaleOptions, discover_schema_dir, extract_items, extract_locale,
-    extract_loot, extract_mobkinds, extract_zone,
+    extract_loot, extract_mobkinds, extract_scripts, extract_zone,
 };
 
 #[derive(Debug, Parser)]
@@ -28,6 +28,8 @@ enum Command {
     Loot(ZoneArgs),
     /// Resolve the loc_ref strings one zone's content points at.
     Locale(LocaleArgs),
+    /// Extract quest script trees and the shared triggers they reference.
+    Scripts(ZoneArgs),
 }
 
 #[derive(Debug, Args)]
@@ -175,6 +177,27 @@ fn run(cli: Cli) -> Result<()> {
             }
             if validate && rate > limit {
                 bail!("unresolved loc_ref rate {rate:.2}% exceeds the {limit:.2}% budget");
+            }
+        }
+        Command::Scripts(args) => {
+            let name = args.name;
+            let options = options(args.common)?;
+            let summary = extract_scripts(&name, &options)?;
+            println!("zone: {}", summary.zone);
+            println!("quest scripts: {}", summary.quest_scripts);
+            println!("script triggers: {}", summary.triggers);
+            println!("counter bindings: {}", summary.counters);
+            println!("script nodes: {}", summary.nodes);
+            println!("implemented nodes: {}", summary.implemented);
+            println!("inert-and-counted nodes: {}", summary.inert);
+            println!("refused nodes: {}", summary.refused);
+            println!("external resources: {}", summary.external_resources.len());
+            println!("unchanged files: {}", summary.unchanged);
+            for trigger_id in summary.trigger_ids {
+                println!("script trigger {trigger_id}");
+            }
+            for (opcode, count) in summary.refused_opcodes {
+                println!("refused opcode {opcode}: {count}");
             }
         }
     }

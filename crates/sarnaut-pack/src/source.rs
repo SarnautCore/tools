@@ -49,6 +49,8 @@ pub struct SourceTree {
     pub items: Vec<ItemDocument>,
     pub loot_tables: Vec<LootTableDocument>,
     pub quests: Vec<QuestDocument>,
+    pub quest_scripts: Vec<QuestScriptDocument>,
+    pub script_triggers: Vec<ScriptTriggerDocument>,
     pub routes: Vec<RouteDocument>,
     pub locales: Vec<LocaleDocument>,
     pub level_curves: Vec<LevelCurveDocument>,
@@ -497,6 +499,136 @@ pub struct QuestRewardItemDocument {
     pub hidden: bool,
 }
 
+/// One quest's script surface (ADR 0036): the counter bindings and the
+/// startImpacts / triggerAgents trees quest activation evaluates.
+#[derive(Debug, Deserialize)]
+pub struct QuestScriptDocument {
+    pub id: String,
+    pub zone: String,
+    /// The quest this script surface belongs to.
+    pub quest: String,
+    #[serde(default)]
+    pub counters: Vec<QuestCounterDocument>,
+    #[serde(default)]
+    pub start_impacts: Vec<ScriptNodeDocument>,
+    #[serde(default)]
+    pub trigger_agents: Vec<ScriptNodeDocument>,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source", default)]
+    pub source: Provenance,
+}
+
+/// One QuestCountId and the objective it advances.
+#[derive(Debug, Deserialize)]
+pub struct QuestCounterDocument {
+    /// Canonical id, for example `questcount.inst-league1.quest-1-30.count-id-1`.
+    pub count_id: String,
+    /// Position in the owning quest's `objectives` list.
+    pub objective: u32,
+    /// Stable semantic identity. The positional index is only compatibility.
+    pub objective_id: String,
+}
+
+/// One TriggerResource document: a trigger tree shared by reference from
+/// ImpactAttachTrigger and TriggerAgent* nodes.
+#[derive(Debug, Deserialize)]
+pub struct ScriptTriggerDocument {
+    pub id: String,
+    pub zone: String,
+    pub root: ScriptNodeDocument,
+    #[serde(default)]
+    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "_source", default)]
+    pub source: Provenance,
+}
+
+/// One node of a recursive script tree, mirroring `sarnaut.content.v1.ScriptNode`
+/// field for field (ADR 0036: "Authored YAML has the same fields").
+#[derive(Debug, Deserialize)]
+pub struct ScriptNodeDocument {
+    pub key: String,
+    pub family: String,
+    pub opcode: String,
+    /// `implemented`, `inert-and-counted` or `refused`.
+    pub tier: String,
+    #[serde(default)]
+    pub fields: Vec<ScriptFieldDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScriptFieldDocument {
+    pub name: String,
+    pub value: ScriptValueDocument,
+}
+
+/// One value of a script field. Exactly one member must be set, mirroring the
+/// `ScriptValue` oneof; the compiler rejects zero or several.
+#[derive(Debug, Default, Deserialize)]
+pub struct ScriptValueDocument {
+    #[serde(default)]
+    pub integer: Option<i64>,
+    #[serde(default)]
+    pub decimal: Option<ScriptDecimalDocument>,
+    #[serde(default)]
+    pub boolean: Option<bool>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub reference: Option<ScriptRefDocument>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub node: Option<Box<ScriptNodeDocument>>,
+    #[serde(default)]
+    pub list: Option<Vec<ScriptValueDocument>>,
+}
+
+/// An exact signed mantissa and base-10 scale: `mantissa * 10^-scale`.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct ScriptDecimalDocument {
+    pub mantissa: i64,
+    #[serde(default)]
+    pub scale: i32,
+}
+
+/// A resolved content reference. The `href` sibling is provenance for the
+/// private YAML only and never reaches a compiled pack (ADR 0011).
+#[derive(Debug, Deserialize)]
+pub struct ScriptRefDocument {
+    pub id: String,
+    #[serde(default)]
+    pub row_type: Option<String>,
+    #[serde(default)]
+    pub href: Option<String>,
+}
+
+/// Collects every content reference a script tree makes, in document order.
+/// Both the reference checker and the item-reachability pass walk trees this
+/// way, so the two never disagree about what a tree names.
+pub fn collect_script_refs<'a>(
+    node: &'a ScriptNodeDocument,
+    into: &mut Vec<&'a ScriptRefDocument>,
+) {
+    for field in &node.fields {
+        collect_value_refs(&field.value, into);
+    }
+}
+
+fn collect_value_refs<'a>(value: &'a ScriptValueDocument, into: &mut Vec<&'a ScriptRefDocument>) {
+    if let Some(reference) = &value.reference {
+        into.push(reference);
+    }
+    if let Some(node) = &value.node {
+        collect_script_refs(node, into);
+    }
+    if let Some(list) = &value.list {
+        for entry in list {
+            collect_value_refs(entry, into);
+        }
+    }
+}
+
 /// One patrol route a placement can follow.
 #[derive(Debug, Deserialize)]
 pub struct RouteDocument {
@@ -855,7 +987,7 @@ fn explicit_zone(value: &Value) -> Option<&str> {
 fn zone_from_document_id(document_id: &str) -> Option<&str> {
     let mut parts = document_id.split('.');
     match parts.next()? {
-        "zone" | "spawn" | "mob" | "quest" | "route" => parts.next(),
+        "zone" | "spawn" | "mob" | "quest" | "route" | "script" | "trigger" => parts.next(),
         _ => None,
     }
 }
@@ -916,6 +1048,28 @@ fn select_reachable(
                     wanted_items.insert(id.to_string());
                 }
             }
+        }
+    }
+    // A script tree can hand an item to the player (ImpactGiveItem) or take
+    // one away; the item document must ship with the pack for the row to mean
+    // anything, so script references reach into the catalogue exactly as quest
+    // rewards do.
+    let mut script_references = Vec::new();
+    for document in &tree.quest_scripts {
+        for node in document
+            .start_impacts
+            .iter()
+            .chain(&document.trigger_agents)
+        {
+            collect_script_refs(node, &mut script_references);
+        }
+    }
+    for document in &tree.script_triggers {
+        collect_script_refs(&document.root, &mut script_references);
+    }
+    for reference in script_references {
+        if reference.row_type.as_deref() == Some("item") {
+            wanted_items.insert(reference.id.clone());
         }
     }
     // An item document that only an overlay supplies is content in its own
@@ -1051,6 +1205,12 @@ fn file_document(
             .chargen_options
             .push(from_value(&mut value, "chargen option", document)?),
         "quest" => tree.quests.push(from_value(&mut value, "quest", document)?),
+        "script" => tree
+            .quest_scripts
+            .push(from_value(&mut value, "quest script", document)?),
+        "trigger" => tree
+            .script_triggers
+            .push(from_value(&mut value, "script trigger", document)?),
         "route" => tree.routes.push(from_value(&mut value, "route", document)?),
         "locale" => tree
             .locales
@@ -1103,6 +1263,15 @@ fn base_files(options: &LoadOptions<'_>) -> Result<Vec<PathBuf>> {
             // pack with no mob rows is a legal, if unplayable, pack.
             files.extend(optional_yaml_files(&spawns.join("mobs"))?);
             files.extend(optional_yaml_files(&zone_root.join("quests"))?);
+            // Script rows (ADR 0036): one quest-script document per quest that
+            // carries counters or impact trees, plus the trigger documents they
+            // reference. Both are zone-scoped by directory.
+            files.extend(optional_yaml_files(
+                &zone_root.join("scripts").join("quests"),
+            )?);
+            files.extend(optional_yaml_files(
+                &zone_root.join("scripts").join("triggers"),
+            )?);
             files.extend(optional_yaml_files(&zone_root.join("routes"))?);
             // The zone's own document sits beside its directory when the
             // extractor has written one.

@@ -162,15 +162,15 @@ pub fn extract_zone(name: &str, options: &ExtractionOptions) -> Result<ZoneSumma
     Ok(summary)
 }
 
-struct ResolvedZone {
-    zone: String,
-    map: String,
-    quest_dir: PathBuf,
-    map_dir: PathBuf,
-    spawn_dir: Option<PathBuf>,
+pub(crate) struct ResolvedZone {
+    pub(crate) zone: String,
+    pub(crate) map: String,
+    pub(crate) quest_dir: PathBuf,
+    pub(crate) map_dir: PathBuf,
+    pub(crate) spawn_dir: Option<PathBuf>,
 }
 
-fn resolve_zone(src: &Path, requested: &str) -> Result<ResolvedZone> {
+pub(crate) fn resolve_zone(src: &Path, requested: &str) -> Result<ResolvedZone> {
     let quest_root = src.join("World/Quests");
     let map_root = src.join("Maps");
     let quest_dir = find_named_directory(&quest_root, requested)

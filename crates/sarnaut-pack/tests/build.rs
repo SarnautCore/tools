@@ -43,6 +43,214 @@ fn two_builds_of_one_source_tree_are_byte_identical() {
 }
 
 #[test]
+fn recursive_script_rows_round_trip_byte_identically() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    write_script_fixture(&source);
+
+    let first = workspace.path().join("first");
+    let second = workspace.path().join("second");
+    compile::build(&common::options(source.clone()), &first).expect("first build");
+    compile::build(&common::options(source), &second).expect("second build");
+
+    for table_name in ["quest-scripts", "script-triggers"] {
+        let left = fs::read(first.join(format!("tables/{table_name}.sptbl")))
+            .expect("read first script table");
+        let right = fs::read(second.join(format!("tables/{table_name}.sptbl")))
+            .expect("read second script table");
+        assert_eq!(left, right, "{table_name} is not deterministic");
+    }
+
+    let scripts: Vec<proto::QuestScript> = decode(&first, "quest-scripts");
+    assert_eq!(scripts.len(), 1);
+    let original = scripts[0].encode_to_vec();
+    let decoded = proto::QuestScript::decode(original.as_slice()).expect("decode quest script");
+    assert_eq!(
+        decoded.encode_to_vec(),
+        original,
+        "quest script changed on round trip"
+    );
+    assert_eq!(
+        decoded.counters[0].objective_id,
+        "quest.harbour-watch.first.objective.0000000000000000000000000000000000000000000000000000000000000000"
+    );
+
+    let deferred = &decoded.start_impacts[0];
+    assert_eq!(deferred.opcode, "ImpactsDeferred");
+    assert_eq!(deferred.tier, proto::CoverageTier::Implemented as i32);
+    assert_eq!(deferred.fields[0].name, "delay");
+    assert_eq!(deferred.fields[1].name, "impacts");
+    let impacts = value_list(&deferred.fields[1]);
+    let if_target = value_node(&impacts.values[0]);
+    assert_eq!(if_target.opcode, "ImpactIfTarget");
+    assert_eq!(if_target.fields[0].name, "impactsIf");
+    assert_eq!(if_target.fields[1].name, "predicate");
+    let unknown = value_node(&value_list(&if_target.fields[0]).values[0]);
+    assert_eq!(unknown.opcode, "FuturePresentationOnly");
+    assert_eq!(unknown.tier, proto::CoverageTier::Inert as i32);
+
+    let triggers: Vec<proto::ScriptTrigger> = decode(&first, "script-triggers");
+    let original = triggers[0].encode_to_vec();
+    let dress = proto::ScriptTrigger::decode(original.as_slice()).expect("decode DressTrigger");
+    assert_eq!(
+        dress.encode_to_vec(),
+        original,
+        "DressTrigger changed on round trip"
+    );
+    let root = dress.root.expect("trigger root");
+    assert_eq!(root.opcode, "TriggerResource");
+    let equip = value_node(&value_list(&root.fields[0]).values[0]);
+    assert_eq!(equip.opcode, "EquipTrigger");
+    let switch = value_node(&value_list(&equip.fields[0]).values[0]);
+    assert_eq!(switch.opcode, "Switch");
+    assert_eq!(switch.fields[0].name, "impactsOff");
+    assert_eq!(switch.fields[1].name, "impactsOn");
+
+    let report: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(first.join("build-report.json")).expect("read build report"),
+    )
+    .expect("parse build report");
+    assert_eq!(report["scripts"]["nodes"], 10);
+    assert_eq!(report["scripts"]["implemented"]["Switch"], 1);
+    assert_eq!(
+        report["scripts"]["inert_and_counted"]["FuturePresentationOnly"],
+        1
+    );
+}
+
+fn value_list(field: &proto::ScriptField) -> &proto::ScriptValueList {
+    match field.value.as_ref().and_then(|value| value.value.as_ref()) {
+        Some(proto::script_value::Value::List(list)) => list,
+        other => panic!("field {} = {other:?}, want list", field.name),
+    }
+}
+
+fn value_node(value: &proto::ScriptValue) -> &proto::ScriptNode {
+    match value.value.as_ref() {
+        Some(proto::script_value::Value::Node(node)) => node,
+        other => panic!("value = {other:?}, want node"),
+    }
+}
+
+fn write_script_fixture(source: &std::path::Path) {
+    let root = source.join("classic/zones/harbour-watch/scripts");
+    fs::create_dir_all(root.join("quests")).expect("create quest scripts");
+    fs::create_dir_all(root.join("triggers")).expect("create script triggers");
+    fs::write(
+        root.join("quests/first.yaml"),
+        r#"schema_version: 1
+id: script.harbour-watch.first
+zone: zone.harbour-watch
+quest: quest.harbour-watch.first
+counters:
+  - count_id: questcount.harbour-watch.first.count-id-1
+    objective: 0
+    objective_id: quest.harbour-watch.first.objective.0000000000000000000000000000000000000000000000000000000000000000
+start_impacts:
+  - key: script.harbour-watch.first/startImpacts[0]
+    family: impact
+    opcode: ImpactsDeferred
+    tier: implemented
+    fields:
+      - name: delay
+        value: { duration_ms: 1500 }
+      - name: impacts
+        value:
+          list:
+            - node:
+                key: script.harbour-watch.first/startImpacts[0]/impacts[0]
+                family: impact
+                opcode: ImpactIfTarget
+                tier: implemented
+                fields:
+                  - name: impactsIf
+                    value:
+                      list:
+                        - node:
+                            key: script.harbour-watch.first/startImpacts[0]/impacts[0]/impactsIf[0]
+                            family: impact
+                            opcode: FuturePresentationOnly
+                            tier: inert-and-counted
+                  - name: predicate
+                    value:
+                      node:
+                        key: script.harbour-watch.first/startImpacts[0]/impacts[0]/predicate
+                        family: predicate
+                        opcode: PredicateHasItem
+                        tier: implemented
+trigger_agents:
+  - key: script.harbour-watch.first/triggerAgents[0]
+    family: trigger
+    opcode: TriggerAgentSelf
+    tier: implemented
+    fields:
+      - name: trigger
+        value:
+          reference:
+            id: trigger.harbour-watch.first.dress-trigger
+            row_type: trigger
+"#,
+    )
+    .expect("write quest script");
+    fs::write(
+        root.join("triggers/first.dress-trigger.yaml"),
+        r#"schema_version: 1
+id: trigger.harbour-watch.first.dress-trigger
+zone: zone.harbour-watch
+root:
+  key: trigger.harbour-watch.first.dress-trigger
+  family: trigger
+  opcode: TriggerResource
+  tier: implemented
+  fields:
+    - name: effects
+      value:
+        list:
+          - node:
+              key: trigger.harbour-watch.first.dress-trigger/effects[0]
+              family: effect
+              opcode: EquipTrigger
+              tier: implemented
+              fields:
+                - name: effects
+                  value:
+                    list:
+                      - node:
+                          key: trigger.harbour-watch.first.dress-trigger/effects[0]/effects[0]
+                          family: effect
+                          opcode: Switch
+                          tier: implemented
+                          fields:
+                            - name: impactsOff
+                              value:
+                                list:
+                                  - node:
+                                      key: trigger.harbour-watch.first.dress-trigger/effects[0]/effects[0]/impactsOff[0]
+                                      family: impact
+                                      opcode: ImpactStopTalk
+                                      tier: implemented
+                            - name: impactsOn
+                              value:
+                                list:
+                                  - node:
+                                      key: trigger.harbour-watch.first.dress-trigger/effects[0]/effects[0]/impactsOn[0]
+                                      family: impact
+                                      opcode: ImpactIncreaseQuestCount
+                                      tier: implemented
+                                      fields:
+                                        - name: id
+                                          value:
+                                            reference:
+                                              id: questcount.harbour-watch.first.count-id-1
+                                              row_type: quest-count-id
+                - name: slot
+                  value: { text: MAINHAND }
+"#,
+    )
+    .expect("write script trigger");
+}
+
+#[test]
 fn manifest_records_every_table_and_its_digest() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
