@@ -32,7 +32,12 @@ const INTERACTIVE_PREFIX: &str = "item.interactive-objects.";
 
 /// Id namespaces that are scoped to one zone, and therefore whose second
 /// segment is a zone slug.
-const ZONE_SCOPED_PREFIXES: [&str; 4] = ["mob", "quest", "spawn", "route"];
+const ZONE_SCOPED_PREFIXES: [&str; 6] = ["mob", "quest", "spawn", "route", "script", "trigger"];
+
+/// Ids under this prefix name source resources no table models yet: script
+/// references into ClientData, buffs, maps, races and the like. The extractor
+/// mints them so the edge survives in the report; nothing resolves them.
+const EXTERNAL_RESOURCE_PREFIX: &str = "ext.";
 
 /// One reference the pack cannot resolve.
 #[derive(Clone, Debug)]
@@ -223,6 +228,10 @@ pub struct Universe {
     pub spawn_tables: BTreeSet<String>,
     pub routes: BTreeSet<String>,
     pub quests: BTreeSet<String>,
+    pub quest_scripts: BTreeSet<String>,
+    pub script_triggers: BTreeSet<String>,
+    /// Every count id a quest-script row binds to an objective.
+    pub quest_count_ids: BTreeSet<String>,
     pub factions: BTreeSet<String>,
     pub mob_kinds: BTreeSet<String>,
     pub abilities: BTreeSet<String>,
@@ -245,6 +254,14 @@ impl Universe {
             spawn_tables: ids(tree.tables.iter().map(|document| &document.id)),
             routes: ids(tree.routes.iter().map(|document| &document.id)),
             quests: ids(tree.quests.iter().map(|document| &document.id)),
+            quest_scripts: ids(tree.quest_scripts.iter().map(|document| &document.id)),
+            script_triggers: ids(tree.script_triggers.iter().map(|document| &document.id)),
+            quest_count_ids: tree
+                .quest_scripts
+                .iter()
+                .flat_map(|document| document.counters.iter())
+                .map(|counter| counter.count_id.clone())
+                .collect(),
             factions: ids(tree.factions.iter().map(|document| &document.id)),
             mob_kinds: ids(tree.mob_kinds.iter().map(|document| &document.id)),
             abilities: ids(tree.abilities.iter().map(|document| &document.id)),
@@ -417,6 +434,58 @@ pub fn check(tree: &SourceTree, universe: &Universe, locales: &LocaleIndex) -> R
         pass.locale(&document.id, &document.loc_ref, &document.source, locales);
     }
 
+    let quest_objectives: BTreeMap<&str, usize> = tree
+        .quests
+        .iter()
+        .map(|quest| (quest.id.as_str(), quest.objectives.len()))
+        .collect();
+    for document in &tree.quest_scripts {
+        pass.one("quest script -> zone", &document.id, &document.zone, |u| {
+            &u.zones
+        });
+        pass.one(
+            "quest script -> quest",
+            &document.id,
+            &document.quest,
+            |u| &u.quests,
+        );
+        if let Some(&objectives) = quest_objectives.get(document.quest.as_str()) {
+            for counter in &document.counters {
+                if counter.objective as usize >= objectives {
+                    pass.report.dangling.push(DanglingRef {
+                        class: "quest script -> objective",
+                        referencer: document.id.clone(),
+                        target: format!(
+                            "{} objective {} (the quest declares {objectives})",
+                            document.quest, counter.objective
+                        ),
+                    });
+                }
+            }
+        }
+        let mut references = Vec::new();
+        for node in document
+            .start_impacts
+            .iter()
+            .chain(&document.trigger_agents)
+        {
+            crate::source::collect_script_refs(node, &mut references);
+        }
+        pass.script_refs(&document.id, &references);
+    }
+
+    for document in &tree.script_triggers {
+        pass.one(
+            "script trigger -> zone",
+            &document.id,
+            &document.zone,
+            |u| &u.zones,
+        );
+        let mut references = Vec::new();
+        crate::source::collect_script_refs(&document.root, &mut references);
+        pass.script_refs(&document.id, &references);
+    }
+
     for document in &tree.items {
         pass.locale(&document.id, &document.loc_ref, &document.source, locales);
     }
@@ -514,6 +583,41 @@ impl Pass<'_> {
         }
     }
 
+    /// Resolves the references a script tree makes, dispatching on the
+    /// row-type slug the extractor stamped. Only namespaces a table models are
+    /// enforced; a reference into anything else — ClientData, buffs, maps,
+    /// races — is recorded as unmodelled rather than failing the build, because
+    /// the impact system reaches resources no row type describes yet.
+    fn script_refs(&mut self, referencer: &str, references: &[&crate::source::ScriptRefDocument]) {
+        for reference in references {
+            match reference.row_type.as_deref().unwrap_or_default() {
+                "trigger" => self.one("script -> trigger", referencer, &reference.id, |u| {
+                    &u.script_triggers
+                }),
+                "spawn-table" => {
+                    self.one("script -> spawn table", referencer, &reference.id, |u| {
+                        &u.spawn_tables
+                    })
+                }
+                "mob" => self.one("script -> mob world", referencer, &reference.id, |u| {
+                    &u.mobs
+                }),
+                "quest-count-id" => {
+                    self.one("script -> quest count id", referencer, &reference.id, |u| {
+                        &u.quest_count_ids
+                    });
+                }
+                "quest" => self.one("script -> quest", referencer, &reference.id, |u| &u.quests),
+                "item" => self.one("script -> item", referencer, &reference.id, |u| &u.items),
+                _ => self.report.unmodelled.push(UnmodelledRef {
+                    class: "script -> resource",
+                    referencer: referencer.to_string(),
+                    target: reference.id.clone(),
+                }),
+            }
+        }
+    }
+
     fn resolve(
         &mut self,
         class: &'static str,
@@ -524,7 +628,7 @@ impl Pass<'_> {
         if target.is_empty() {
             return;
         }
-        if target.starts_with(INTERACTIVE_PREFIX) {
+        if target.starts_with(INTERACTIVE_PREFIX) || target.starts_with(EXTERNAL_RESOURCE_PREFIX) {
             self.report.unmodelled.push(UnmodelledRef {
                 class,
                 referencer: referencer.to_string(),

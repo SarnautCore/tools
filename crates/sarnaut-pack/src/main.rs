@@ -162,6 +162,14 @@ fn run_check(args: CheckArgs) -> Result<()> {
     let options = args.source.into_options()?;
     let pack = compile::compile(&options).context("check source tree")?;
     print_summary(&pack);
+    if let Some(scripts) = &pack.report.scripts {
+        let refused: usize = scripts.refused.values().sum();
+        if refused > 0 {
+            bail!(
+                "script coverage contains {refused} refused node(s); change their checked-in tier only after the runtime supports them"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -185,6 +193,24 @@ fn print_summary(pack: &CompiledPack) {
     }
     for (name, rows) in pack.tables() {
         println!("table    {name} ({rows} rows)");
+    }
+    if let Some(scripts) = &pack.report.scripts {
+        let implemented: usize = scripts.implemented.values().sum();
+        let inert: usize = scripts.inert_and_counted.values().sum();
+        let refused: usize = scripts.refused.values().sum();
+        println!(
+            "scripts  {} nodes: implemented={implemented}, inert-and-counted={inert}, refused={refused}",
+            scripts.nodes
+        );
+        for (tier, opcodes) in [
+            ("implemented", &scripts.implemented),
+            ("inert-and-counted", &scripts.inert_and_counted),
+            ("refused", &scripts.refused),
+        ] {
+            for (opcode, count) in opcodes {
+                println!("opcode   {tier} {opcode} {count}");
+            }
+        }
     }
     let references = &pack.references;
     println!(
