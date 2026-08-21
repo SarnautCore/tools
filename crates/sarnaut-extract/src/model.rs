@@ -287,6 +287,7 @@ pub struct QuestPrerequisite {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuestObjective {
+    pub objective_id: String,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loc_ref: Option<String>,

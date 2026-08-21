@@ -426,6 +426,34 @@ fn placements_keep_their_authored_spawn_time() {
 }
 
 #[test]
+fn colliding_quest_objective_ids_fail_the_build() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    let quest = source
+        .join("classic/zones")
+        .join(common::ZONE)
+        .join("quests/first.yaml");
+    let text = fs::read_to_string(&quest).expect("read quest");
+    let duplicate = r#"  - objective_id: quest.harbour-watch.first.objective.1111111111111111111111111111111111111111111111111111111111111111
+    kind: quest-count-item
+    limit: 1
+"#;
+    fs::write(
+        &quest,
+        text.replace("rewards:\n", &format!("{duplicate}rewards:\n")),
+    )
+    .expect("write duplicate objective");
+
+    let error = compile::compile(&common::options(source))
+        .expect_err("build should reject colliding objective ids");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("quest objective id") && message.contains("collides"),
+        "error does not identify the objective collision: {message}"
+    );
+}
+
+#[test]
 fn a_placement_referencing_nothing_fails_the_build() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));

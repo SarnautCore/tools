@@ -127,7 +127,8 @@ starter:
 finisher:
   id: mob.harbour-watch.gull
 objectives:
-  - kind: quest-count-kill
+  - objective_id: quest.harbour-watch.first.objective.1111111111111111111111111111111111111111111111111111111111111111
+    kind: quest-count-kill
     limit: 3
     show_count: true
     targets:

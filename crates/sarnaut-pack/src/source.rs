@@ -461,6 +461,7 @@ pub struct QuestPrerequisiteDocument {
 
 #[derive(Debug, Deserialize)]
 pub struct QuestObjectiveDocument {
+    pub objective_id: String,
     pub kind: String,
     #[serde(default)]
     pub loc_ref: Option<String>,

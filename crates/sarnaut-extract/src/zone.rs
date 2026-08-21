@@ -10,6 +10,7 @@ use crate::model::{
     QuestObjective, QuestPrerequisite, QuestRewards, ResourceRef, RewardItem, RouteDocument,
     RouteLink, RoutePoint, SpawnEntry, SpawnPlacement, SpawnTableDocument, ZoneSummary,
 };
+use crate::objective::derive_objective_id;
 use crate::output::OutputWriter;
 use crate::reference::{
     canonical_id_from_source_path, canonical_zone_slug, resource_ref, slug, slug_path,
@@ -70,7 +71,7 @@ pub fn extract_zone(name: &str, options: &ExtractionOptions) -> Result<ZoneSumma
             &options.src,
             &path,
             xdb.source,
-        );
+        )?;
         let file_slug = id
             .strip_prefix(&format!("quest.{zone_slug}."))
             .context("quest ID zone prefix")?;
@@ -128,8 +129,15 @@ pub fn extract_zone(name: &str, options: &ExtractionOptions) -> Result<ZoneSumma
             .collect();
         let borrowed: Vec<_> = parts.iter().map(String::as_str).collect();
         let source_slug = slug_path(&borrowed);
-        let (placements, routes) =
-            placements_and_routes(root, &zone_slug, &map_slug, &source_slug, &xdb.source);
+        let origin = tile_origin(&resolved.map_dir, &path)?;
+        let (placements, routes) = placements_and_routes(
+            root,
+            &zone_slug,
+            &map_slug,
+            &source_slug,
+            &xdb.source,
+            origin,
+        );
         if !placements.is_empty() {
             let document = PlacementDocument {
                 schema_version: 1,
@@ -319,7 +327,7 @@ fn quest_document(
     src: &Path,
     path: &Path,
     source: Provenance,
-) -> QuestDocument {
+) -> Result<QuestDocument> {
     let finisher = child(root, "finisher")
         .and_then(|node| href(node, "mobWorld"))
         .map(|value| resource_ref(&value));
@@ -338,13 +346,25 @@ fn quest_document(
                 .collect()
         })
         .unwrap_or_default();
-    let objectives = child(root, "counters")
+    let objectives: Vec<_> = child(root, "counters")
         .map(|node| {
             children(node, "Item")
-                .map(|item| quest_objective(item, src, path))
+                .map(|item| quest_objective(item, &id, src, path))
                 .collect()
         })
         .unwrap_or_default();
+    let mut objective_ids = BTreeMap::new();
+    for objective in &objectives {
+        if let Some(previous_kind) =
+            objective_ids.insert(objective.objective_id.clone(), objective.kind.clone())
+        {
+            bail!(
+                "quest {id} has colliding objective id {} for {previous_kind} and {}",
+                objective.objective_id,
+                objective.kind
+            );
+        }
+    }
     let rewards = child(root, "reward").map(quest_rewards).unwrap_or_default();
     let mut flags = BTreeMap::new();
     for (source_name, output_name) in [
@@ -360,7 +380,7 @@ fn quest_document(
         }
     }
 
-    QuestDocument {
+    Ok(QuestDocument {
         schema_version: 1,
         id,
         zone: format!("zone.{zone}"),
@@ -412,10 +432,10 @@ fn quest_document(
             ],
         ),
         source,
-    }
+    })
 }
 
-fn quest_objective(node: Node<'_, '_>, src: &Path, path: &Path) -> QuestObjective {
+fn quest_objective(node: Node<'_, '_>, quest_id: &str, src: &Path, path: &Path) -> QuestObjective {
     let mut targets = Vec::new();
     for collection in ["items", "objects", "mobs"] {
         if let Some(parent) = child(node, collection) {
@@ -427,12 +447,23 @@ fn quest_objective(node: Node<'_, '_>, src: &Path, path: &Path) -> QuestObjectiv
             );
         }
     }
+    let kind = node
+        .attribute("type")
+        .map(type_tail)
+        .map(slug)
+        .unwrap_or_else(|| "unknown".into());
+    let objective_id = derive_objective_id(
+        quest_id,
+        &kind,
+        href(node, "id").as_deref(),
+        href(node, "customName").as_deref(),
+        targets
+            .iter()
+            .map(|target| target.id.as_deref().unwrap_or(&target.href)),
+    );
     QuestObjective {
-        kind: node
-            .attribute("type")
-            .map(type_tail)
-            .map(slug)
-            .unwrap_or_else(|| "unknown".into()),
+        objective_id,
+        kind,
         loc_ref: localized_href(node, "customName", src, path),
         limit: i64_value(node, "limit"),
         internal: bool_value(node, "isInternal"),
@@ -533,6 +564,7 @@ fn placements_and_routes(
     map: &str,
     source_slug: &str,
     source: &Provenance,
+    origin: TileOrigin,
 ) -> (Vec<SpawnPlacement>, Vec<RouteDocument>) {
     let mut placements = Vec::new();
     let mut routes = Vec::new();
@@ -561,6 +593,7 @@ fn placements_and_routes(
                         object: resource_ref(&table_href),
                         scan_radius: f64_value(object, "scanRadius"),
                         spawn_time: None,
+                        origin,
                     },
                     place,
                 );
@@ -588,6 +621,7 @@ fn placements_and_routes(
                     object: resource_ref(&object_href),
                     scan_radius: f64_value(object, "scanRadius"),
                     spawn_time,
+                    origin,
                 },
                 place,
             );
@@ -605,6 +639,7 @@ struct PlacementContext<'a> {
     object: ResourceRef,
     scan_radius: Option<f64>,
     spawn_time: Option<String>,
+    origin: TileOrigin,
 }
 
 fn push_placement(
@@ -620,7 +655,9 @@ fn push_placement(
             .filter_map(|(index, item)| {
                 Some(RoutePoint {
                     index,
-                    position: child(item, "coords").and_then(position)?,
+                    position: context
+                        .origin
+                        .apply(child(item, "coords").and_then(position)?),
                     script_ref: href(item, "script"),
                 })
             })
@@ -660,12 +697,15 @@ fn push_placement(
         });
         Some(route_id)
     });
-    let center = child(place, "center").and_then(position).or_else(|| {
-        child(place, "points")
-            .and_then(|points| child(points, "Item"))
-            .and_then(|point| child(point, "coords"))
-            .and_then(position)
-    });
+    let center = child(place, "center")
+        .and_then(position)
+        .or_else(|| {
+            child(place, "points")
+                .and_then(|points| child(points, "Item"))
+                .and_then(|point| child(point, "coords"))
+                .and_then(position)
+        })
+        .map(|position| context.origin.apply(position));
     let place_orientation = orientation(place);
     placements.push(SpawnPlacement {
         id: format!(
@@ -694,6 +734,70 @@ fn server_object_files(map_root: &Path) -> Result<Vec<PathBuf>> {
             .is_some_and(|name| name.to_string_lossy().ends_with("_ServerObjects.xdb"))
     });
     Ok(files)
+}
+
+const TILE_PITCH: f64 = 256.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TileOrigin {
+    x: f64,
+    y: f64,
+}
+
+impl TileOrigin {
+    fn apply(self, local: crate::model::Position) -> crate::model::Position {
+        crate::model::Position {
+            x: self.x + local.x,
+            y: self.y + local.y,
+            z: local.z,
+        }
+    }
+}
+
+/// Parses ADR 0038's `SX_SY/R_C_ServerObjects.xdb` naming contract. The first
+/// sector and tile components contribute X; the second components contribute Y.
+fn tile_origin(map_root: &Path, server_objects: &Path) -> Result<TileOrigin> {
+    let relative = server_objects.strip_prefix(map_root).with_context(|| {
+        format!(
+            "{} is outside map root {}",
+            server_objects.display(),
+            map_root.display()
+        )
+    })?;
+    let sector_name = relative
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .context("server-object path has no UTF-8 sector directory")?;
+    let file_name = relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("server-object path has no UTF-8 filename")?;
+    let tile_name = file_name
+        .strip_suffix("_ServerObjects.xdb")
+        .with_context(|| format!("server-object filename {file_name:?} has no expected suffix"))?;
+    let (sector_x, sector_y) = coordinate_pair(sector_name, "sector directory")?;
+    let (tile_x, tile_y) = coordinate_pair(tile_name, "tile filename")?;
+    Ok(TileOrigin {
+        x: f64::from(sector_x + tile_x) * TILE_PITCH,
+        y: f64::from(sector_y + tile_y) * TILE_PITCH,
+    })
+}
+
+fn coordinate_pair(value: &str, label: &str) -> Result<(u32, u32)> {
+    let (first, second) = value
+        .split_once('_')
+        .with_context(|| format!("{label} {value:?} is not FIRST_SECOND"))?;
+    if second.contains('_') {
+        bail!("{label} {value:?} has more than two components");
+    }
+    let first = first
+        .parse()
+        .with_context(|| format!("{label} {value:?} has a non-numeric first component"))?;
+    let second = second
+        .parse()
+        .with_context(|| format!("{label} {value:?} has a non-numeric second component"))?;
+    Ok((first, second))
 }
 
 #[cfg(test)]
@@ -769,6 +873,10 @@ mod tests {
             quest.contains("loc_ref: World/Quests/TestZone/First/Counter"),
             "{quest}"
         );
+        assert!(
+            quest.contains("objective_id: quest.test-zone.first.objective."),
+            "{quest}"
+        );
 
         let mob = fs::read_to_string(
             output
@@ -779,6 +887,126 @@ mod tests {
         assert!(
             mob.contains("name: Characters/Human/Instances/TestZone/Guide"),
             "{mob}"
+        );
+    }
+
+    #[test]
+    fn instleague1_patch_local_placement_round_trips_to_global_frame() {
+        let map_root = Path::new("Maps/Inst_LeagueStart");
+        let source = map_root.join("000_020/1_2_ServerObjects.xdb");
+        let origin = tile_origin(map_root, &source).unwrap();
+        let local = crate::model::Position {
+            x: 61.1128,
+            y: 241.054,
+            z: 56.4219,
+        };
+
+        // Derive the expected value from ADR 0038's names, so swapping the
+        // filename axes or omitting either origin makes this regression fail.
+        let sector_x = 0.0;
+        let sector_y = 20.0;
+        let tile_x = 1.0;
+        let tile_y = 2.0;
+        let expected_x = (sector_x + tile_x) * TILE_PITCH + local.x;
+        let expected_y = (sector_y + tile_y) * TILE_PITCH + local.y;
+        let global = origin.apply(local);
+
+        assert_eq!(global.x, expected_x);
+        assert_eq!(global.y, expected_y);
+        assert_eq!(global.z, local.z);
+        assert!(global.y > TILE_PITCH, "placement remained tile-local");
+    }
+
+    #[test]
+    fn adjacent_tile_wrap_and_sector_axis_match_adr_0038() {
+        let map_root = Path::new("Maps/Inst_LeagueStart");
+        let tile_1_2 =
+            tile_origin(map_root, &map_root.join("000_020/1_2_ServerObjects.xdb")).unwrap();
+        let tile_1_3 =
+            tile_origin(map_root, &map_root.join("000_020/1_3_ServerObjects.xdb")).unwrap();
+        let sector_20_20 =
+            tile_origin(map_root, &map_root.join("020_020/1_2_ServerObjects.xdb")).unwrap();
+
+        assert_eq!(tile_1_3.x, tile_1_2.x);
+        assert_eq!(tile_1_3.y - tile_1_2.y, TILE_PITCH);
+        assert_eq!(sector_20_20.x - tile_1_2.x, 20.0 * TILE_PITCH);
+        assert_eq!(sector_20_20.y, tile_1_2.y);
+
+        let before_wrap = tile_1_2.apply(crate::model::Position {
+            x: 61.1128,
+            y: 255.472,
+            z: 0.0,
+        });
+        let after_wrap = tile_1_3.apply(crate::model::Position {
+            x: 61.1128,
+            y: 0.819767,
+            z: 0.0,
+        });
+        assert!(after_wrap.y > before_wrap.y);
+        assert!(after_wrap.y - before_wrap.y < 2.0);
+    }
+
+    #[test]
+    fn objective_ids_survive_reorder_rerun_and_unrelated_fields() {
+        fn ids(xml: &str) -> Vec<String> {
+            let document = roxmltree::Document::parse(xml).unwrap();
+            let root = document.root_element();
+            let mut ids: Vec<_> = children(child(root, "counters").unwrap(), "Item")
+                .map(|node| {
+                    quest_objective(
+                        node,
+                        "quest.test-zone.stable",
+                        Path::new("source"),
+                        Path::new("source/Quest.xdb"),
+                    )
+                    .objective_id
+                })
+                .collect();
+            ids.sort();
+            ids
+        }
+
+        let first = r#"<QuestResource><counters>
+            <Item type="QuestCountSpecial"><id href="CountId_1.xdb#old"/><limit>1</limit></Item>
+            <Item type="QuestCountKill"><objects><Item href="/Creatures/Rat.xdb#old"/></objects></Item>
+        </counters></QuestResource>"#;
+        let reordered_with_new_field = r#"<QuestResource><counters>
+            <Item type="QuestCountKill"><objects><Item href="/Creatures/Rat.xdb#new"/></objects><futureSchemaField>ignored</futureSchemaField></Item>
+            <Item type="QuestCountSpecial"><id href="CountId_1.xdb#new"/><limit>99</limit><futureSchemaField>ignored</futureSchemaField></Item>
+        </counters></QuestResource>"#;
+
+        assert_eq!(ids(first), ids(first), "two reruns must be stable");
+        assert_eq!(ids(first), ids(reordered_with_new_field));
+    }
+
+    #[test]
+    fn colliding_objective_ids_fail_extraction() {
+        let xml = roxmltree::Document::parse(
+            r#"<gameMechanics.constructor.schemes.quest.QuestResource><counters>
+                <Item type="QuestCountKill"><objects><Item href="/Creatures/Rat.xdb"/></objects></Item>
+                <Item type="QuestCountKill"><objects><Item href="/Creatures/Rat.xdb"/></objects></Item>
+            </counters><reward/></gameMechanics.constructor.schemes.quest.QuestResource>"#,
+        )
+        .unwrap();
+        let error = quest_document(
+            xml.root_element(),
+            "quest.test-zone.collision".into(),
+            "test-zone".into(),
+            None,
+            Path::new("source"),
+            Path::new("source/Quest.xdb"),
+            Provenance {
+                path: "Quest.xdb".into(),
+                blake3: "test".into(),
+                extractor: "test".into(),
+                source_root: None,
+                prototype_chain: None,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("colliding objective id"),
+            "{error:#}"
         );
     }
 }
