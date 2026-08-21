@@ -369,7 +369,7 @@ pub struct ItemDocument {
     #[serde(default)]
     pub level: Option<u32>,
     #[serde(default)]
-    pub required_level: Option<u32>,
+    pub required_level: Option<i32>,
     /// Maximum units in one stack. `mechanics/loot.md` rule 5.7.1 makes this
     /// per-item content rather than a constant, so an absent value stays absent
     /// here and the reader decides what it means.

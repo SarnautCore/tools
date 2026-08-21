@@ -315,6 +315,7 @@ source_type: demo.ItemResource
 loc_ref:
   name: HarbourTonic.Name.txt
 level: 2
+required_level: -1
 stack_limit: 20
 vendor_price:
   sell: 4
@@ -329,6 +330,7 @@ category: junk
 source_type: demo.ItemResource
 loc_ref:
   name: HarbourShell.Name.txt
+required_level: -2
 stack_limit: 1
 "#,
     );
