@@ -743,6 +743,26 @@ fn item_required_level_migration_keeps_positive_wire_bytes_and_signed_values() {
 }
 
 #[test]
+fn an_omitted_item_required_level_uses_the_classic_source_default() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    common::write_loot(&source);
+    let shell = source.join("classic/items/shell.yaml");
+    let document = fs::read_to_string(&shell).expect("read shell item");
+    fs::write(&shell, document.replace("required_level: -2\n", ""))
+        .expect("remove authored item gate");
+
+    let out = workspace.path().join("pack");
+    compile::build(&common::options(source), &out).expect("build");
+    let items: Vec<proto::Item> = decode(&out, "items");
+    let shell = items
+        .iter()
+        .find(|item| item.id == "item.junk.harbour-shell")
+        .expect("shell row");
+    assert_eq!(shell.required_level, 1);
+}
+
+#[test]
 fn a_source_tree_with_no_loot_documents_carries_no_item_or_loot_table() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));

@@ -1212,7 +1212,10 @@ fn item_rows(tree: &SourceTree, locales: &LocaleIndex, keep_extra: bool) -> Resu
             ),
             category: document.category.clone().unwrap_or_default(),
             level: document.level.unwrap_or_default(),
-            required_level: document.required_level.unwrap_or_default(),
+            // ItemResource initializes this field to one before loading XDB
+            // fields. An omitted authored field therefore means one, while
+            // explicit negative sentinels must survive unchanged.
+            required_level: document.required_level.unwrap_or(1),
             stack_limit: document.stack_limit.unwrap_or_default(),
             vendor_sell: price.sell,
             vendor_buy: price.buy,
