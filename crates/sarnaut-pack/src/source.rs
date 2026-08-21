@@ -44,6 +44,7 @@ pub struct SourceTree {
     pub mobs: Vec<MobDocument>,
     pub mob_kinds: Vec<MobKindDocument>,
     pub abilities: Vec<AbilityDocument>,
+    pub native_actions: Vec<NativeActionDocument>,
     pub factions: Vec<FactionDocument>,
     pub chargen_options: Vec<ChargenDocument>,
     pub items: Vec<ItemDocument>,
@@ -54,6 +55,7 @@ pub struct SourceTree {
     pub routes: Vec<RouteDocument>,
     pub locales: Vec<LocaleDocument>,
     pub level_curves: Vec<LevelCurveDocument>,
+    pub player_progressions: Vec<PlayerProgressionDocument>,
     /// Which overlay layers were applied, in `layers.yaml` order.
     pub layers: Vec<AppliedLayer>,
     /// Why each curated document exists. Aggregated into `build-report.json`
@@ -332,6 +334,79 @@ pub struct AbilityEffectDocument {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct NativeActionDocument {
+    pub id: String,
+    pub target_policy: String,
+    pub range_m: ScriptDecimalDocument,
+    pub cast_duration_ms: u32,
+    pub channel_duration_ms: u32,
+    pub prepare_duration_ms: u32,
+    pub requires_los: bool,
+    pub is_aggro: bool,
+    pub triggers_gcd: bool,
+    pub ignores_gcd: bool,
+    #[serde(default)]
+    pub action_group_id: Option<String>,
+    #[serde(default)]
+    pub cooldown: Option<ActionCooldownDocument>,
+    #[serde(default)]
+    pub resource: Option<ActionResourceDocument>,
+    #[serde(default)]
+    pub caster_conditions: Vec<ScriptNodeDocument>,
+    #[serde(default)]
+    pub target_impacts: Vec<ScriptNodeDocument>,
+    #[serde(rename = "_source", default)]
+    pub source: Provenance,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ActionCooldownDocument {
+    #[serde(default)]
+    pub base: Option<ScriptDecimalDocument>,
+    pub duration_ms: u32,
+    #[serde(default)]
+    pub group_id: Option<String>,
+    #[serde(default)]
+    pub scaler: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ActionResourceDocument {
+    pub kind: String,
+    pub cost: ScriptDecimalDocument,
+    pub scale_by_weapon_speed: bool,
+    pub source: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlayerProgressionDocument {
+    pub id: String,
+    pub max_level: u32,
+    pub respawn_delay_ms: u32,
+    pub resurrection_sickness_duration_ms: u32,
+    #[serde(default)]
+    pub thresholds: Vec<PlayerLevelThresholdDocument>,
+    #[serde(default)]
+    pub experience_impacts: Vec<ExperienceImpactDocument>,
+    #[serde(rename = "_source", default)]
+    pub source: Provenance,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct PlayerLevelThresholdDocument {
+    pub level: u32,
+    pub cumulative_experience: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExperienceImpactDocument {
+    pub id: String,
+    pub mob_count: u32,
+    pub mob_level: u32,
+    pub resolved_experience: u64,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct FactionDocument {
     pub id: String,
     #[serde(default)]
@@ -375,6 +450,9 @@ pub struct ItemDocument {
     /// here and the reader decides what it means.
     #[serde(default)]
     pub stack_limit: Option<i32>,
+    /// Resolved offline from the ruleset's CursedItems.canBeCursed predicate.
+    #[serde(default)]
+    pub curse_eligible: bool,
     #[serde(default)]
     pub vendor_price: Option<VendorPriceDocument>,
     #[serde(default)]
@@ -780,9 +858,15 @@ pub struct ChargenDocument {
     #[serde(default)]
     pub starting_stats: Vec<SourceStat>,
     #[serde(default)]
+    pub stats: Option<StartingCharacterStatsDocument>,
+    #[serde(default)]
     pub starting_loadout: Vec<SourceLoadoutEntry>,
     #[serde(default)]
     pub starting_abilities: Vec<String>,
+    #[serde(default)]
+    pub starting_actions: Vec<StartingActionDocument>,
+    #[serde(default)]
+    pub passive_ability_ids: Vec<String>,
     #[serde(default)]
     pub starting_quests: Vec<String>,
     #[serde(default)]
@@ -802,6 +886,55 @@ pub struct ChargenSpawn {
 pub struct SourceStat {
     pub stat: String,
     pub value: f32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExactStatDocument {
+    pub stat: String,
+    pub value: ScriptDecimalDocument,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartingCharacterStatsDocument {
+    pub health: u32,
+    pub max_health: u32,
+    pub resource: StartingResourceDocument,
+    #[serde(default)]
+    pub innate: Vec<ExactStatDocument>,
+    pub armor: ScriptDecimalDocument,
+    #[serde(default)]
+    pub resistances: Vec<ExactStatDocument>,
+    pub hit_dice: ScriptDecimalDocument,
+    pub mana_dice: ScriptDecimalDocument,
+    #[serde(default)]
+    pub base_stat_value: Option<ScriptDecimalDocument>,
+    #[serde(default)]
+    pub weapon_dps_default: Option<ScriptDecimalDocument>,
+    #[serde(default)]
+    pub fairy_scaler: Option<ScriptDecimalDocument>,
+    pub mainhand: WeaponProfileDocument,
+    pub ranged: WeaponProfileDocument,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartingResourceDocument {
+    pub kind: String,
+    pub initial: ScriptDecimalDocument,
+    pub maximum: ScriptDecimalDocument,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WeaponProfileDocument {
+    pub minimum_damage: ScriptDecimalDocument,
+    pub maximum_damage: ScriptDecimalDocument,
+    pub speed_ms: ScriptDecimalDocument,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartingActionDocument {
+    #[serde(default)]
+    pub slot_index: Option<u32>,
+    pub action_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1215,6 +1348,9 @@ fn file_document(
         "ability" => tree
             .abilities
             .push(from_value(&mut value, "ability", document)?),
+        "action" => tree
+            .native_actions
+            .push(from_value(&mut value, "native action", document)?),
         "faction" => tree
             .factions
             .push(from_value(&mut value, "faction", document)?),
@@ -1235,6 +1371,10 @@ fn file_document(
         "levelcurve" => tree
             .level_curves
             .push(from_value(&mut value, "level curve", document)?),
+        "progression" => {
+            tree.player_progressions
+                .push(from_value(&mut value, "player progression", document)?)
+        }
         "zone" => tree.zones.push(from_value(&mut value, "zone", document)?),
         "item" => tree.items.push(from_value(&mut value, "item", document)?),
         "loot" => tree
@@ -1304,7 +1444,9 @@ fn base_files(options: &LoadOptions<'_>) -> Result<Vec<PathBuf>> {
                 "mobclasses",
                 "mobqualities",
                 "abilities",
+                "actions",
                 "levelcurves",
+                "progression",
             ] {
                 files.extend(optional_yaml_files(&ruleset.join(global))?);
             }

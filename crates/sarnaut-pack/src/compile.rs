@@ -31,6 +31,8 @@ pub const TABLE_LOCALE: &str = "locale";
 pub const TABLE_MOB_KINDS: &str = "mob-kinds";
 pub const TABLE_LEVEL_CURVE: &str = "level-curve";
 pub const TABLE_MAP_LOCATORS: &str = "map-locators";
+pub const TABLE_NATIVE_ACTIONS: &str = "native-actions";
+pub const TABLE_PLAYER_PROGRESSION: &str = "player-progression";
 
 /// Maximum container depth of a loot tree, `mechanics/loot.md` section 3's
 /// `MAX_TREE_DEPTH`. The deepest tree in reference data is 2; this is headroom,
@@ -198,6 +200,8 @@ pub fn compile(options: &BuildOptions) -> Result<CompiledPack> {
         &locales,
     )?;
     let abilities = ability_rows(&tree, &locales, options.keep_extra)?;
+    let native_actions = native_action_rows(&tree)?;
+    let player_progression = player_progression_rows(&tree)?;
     let factions = faction_rows(&tree, &locales, options.keep_extra)?;
     let mob_kinds = mob_kind_rows(&tree, &locales, options.keep_extra)?;
     let mobs = mob_rows(&tree, &locales, options.keep_extra)?;
@@ -246,6 +250,16 @@ pub fn compile(options: &BuildOptions) -> Result<CompiledPack> {
         (TABLE_LOCALE, proto::RowType::Locale, &locale_rows),
         (TABLE_MOB_KINDS, proto::RowType::MobKind, &mob_kinds),
         (TABLE_LEVEL_CURVE, proto::RowType::LevelCurve, &level_curve),
+        (
+            TABLE_NATIVE_ACTIONS,
+            proto::RowType::NativeAction,
+            &native_actions,
+        ),
+        (
+            TABLE_PLAYER_PROGRESSION,
+            proto::RowType::PlayerProgression,
+            &player_progression,
+        ),
         (
             TABLE_MAP_LOCATORS,
             proto::RowType::MapLocator,
@@ -617,6 +631,138 @@ fn ability_rows(tree: &SourceTree, locales: &LocaleIndex, keep_extra: bool) -> R
             extra: extra_map(&document.extra, keep_extra)?,
         };
         insert_unique(&mut seen, &document.id, message, "ability")?;
+    }
+    Ok(encode_rows(seen))
+}
+
+fn decimal(value: source::ScriptDecimalDocument) -> proto::Decimal {
+    proto::Decimal {
+        mantissa: value.mantissa,
+        scale: value.scale,
+    }
+}
+
+fn native_action_rows(tree: &SourceTree) -> Result<Vec<Row>> {
+    let mut seen: BTreeMap<String, proto::NativeAction> = BTreeMap::new();
+    for document in &tree.native_actions {
+        let mut check = ScriptRowCheck::new(&document.id);
+        let caster_conditions = document
+            .caster_conditions
+            .iter()
+            .map(|node| script_node(node, &mut check, 1))
+            .collect::<Result<Vec<_>>>()?;
+        let target_impacts = document
+            .target_impacts
+            .iter()
+            .map(|node| script_node(node, &mut check, 1))
+            .collect::<Result<Vec<_>>>()?;
+        let message = proto::NativeAction {
+            id: document.id.clone(),
+            target_policy: document.target_policy.clone(),
+            range_m: Some(decimal(document.range_m)),
+            cast_duration_ms: document.cast_duration_ms,
+            channel_duration_ms: document.channel_duration_ms,
+            requires_los: document.requires_los,
+            is_aggro: document.is_aggro,
+            triggers_gcd: document.triggers_gcd,
+            ignores_gcd: document.ignores_gcd,
+            action_group_id: document.action_group_id.clone().unwrap_or_default(),
+            cooldown: document
+                .cooldown
+                .as_ref()
+                .map(|cooldown| proto::ActionCooldown {
+                    duration_ms: cooldown.duration_ms,
+                    group_id: cooldown.group_id.clone().unwrap_or_default(),
+                    scaler: cooldown.scaler.clone().unwrap_or_default(),
+                    base: cooldown.base.map(decimal),
+                }),
+            resource: document
+                .resource
+                .as_ref()
+                .map(|resource| proto::ActionResource {
+                    kind: resource.kind.clone(),
+                    cost: Some(decimal(resource.cost)),
+                    scale_by_weapon_speed: resource.scale_by_weapon_speed,
+                    source: resource.source.clone(),
+                }),
+            target_impacts,
+            prepare_duration_ms: document.prepare_duration_ms,
+            caster_conditions,
+        };
+        insert_unique(&mut seen, &document.id, message, "native action")?;
+    }
+    Ok(encode_rows(seen))
+}
+
+fn player_progression_rows(tree: &SourceTree) -> Result<Vec<Row>> {
+    let mut seen: BTreeMap<String, proto::PlayerProgression> = BTreeMap::new();
+    for document in &tree.player_progressions {
+        if document.thresholds.len() != document.max_level as usize {
+            bail!(
+                "player progression {} has {} thresholds, want max_level {}",
+                document.id,
+                document.thresholds.len(),
+                document.max_level
+            );
+        }
+        let mut previous_experience = 0;
+        for (index, threshold) in document.thresholds.iter().enumerate() {
+            let expected_level = index as u32 + 1;
+            if threshold.level != expected_level {
+                bail!(
+                    "player progression {} threshold {} names level {}, want {}",
+                    document.id,
+                    index,
+                    threshold.level,
+                    expected_level
+                );
+            }
+            if index > 0 && threshold.cumulative_experience <= previous_experience {
+                bail!(
+                    "player progression {} level {} cumulative experience {} is not greater than {}",
+                    document.id,
+                    threshold.level,
+                    threshold.cumulative_experience,
+                    previous_experience
+                );
+            }
+            previous_experience = threshold.cumulative_experience;
+        }
+        let mut impact_ids = BTreeSet::new();
+        for impact in &document.experience_impacts {
+            if !impact_ids.insert(&impact.id) {
+                bail!(
+                    "player progression {} repeats impact {}",
+                    document.id,
+                    impact.id
+                );
+            }
+        }
+        let message = proto::PlayerProgression {
+            id: document.id.clone(),
+            max_level: document.max_level,
+            thresholds: document
+                .thresholds
+                .iter()
+                .map(|threshold| proto::PlayerLevelThreshold {
+                    level: threshold.level,
+                    cumulative_experience: threshold.cumulative_experience,
+                })
+                .collect(),
+            experience_impacts: document
+                .experience_impacts
+                .iter()
+                .map(|impact| proto::ExperienceImpact {
+                    id: impact.id.clone(),
+                    mob_count: impact.mob_count,
+                    mob_level: impact.mob_level,
+                    resolved_experience: impact.resolved_experience,
+                })
+                .collect(),
+            respawn_delay_ms: document.respawn_delay_ms,
+            resurrection_sickness_duration_ms: document.resurrection_sickness_duration_ms,
+        };
+        insert_unique(&mut seen, &document.id, message, "player progression")?;
     }
     Ok(encode_rows(seen))
 }
@@ -1493,6 +1639,18 @@ fn chargen_rows(tree: &SourceTree, locales: &LocaleIndex, keep_extra: bool) -> R
                 document.spawn.zone_id
             );
         }
+        let mut action_slots = BTreeSet::new();
+        for action in &document.starting_actions {
+            if let Some(slot_index) = action.slot_index
+                && !action_slots.insert(slot_index)
+            {
+                bail!(
+                    "chargen option {} repeats starting action slot {}",
+                    document.id,
+                    slot_index
+                );
+            }
+        }
         let message = proto::ChargenOption {
             id: document.id.clone(),
             race: document.race.clone(),
@@ -1535,10 +1693,66 @@ fn chargen_rows(tree: &SourceTree, locales: &LocaleIndex, keep_extra: bool) -> R
             starting_abilities: document.starting_abilities.clone(),
             starting_quests: document.starting_quests.clone(),
             extra: extra_map(&document.extra, keep_extra)?,
+            stats: document.stats.as_ref().map(starting_character_stats),
+            starting_actions: document
+                .starting_actions
+                .iter()
+                .map(|entry| proto::StartingAction {
+                    slot_index: entry.slot_index,
+                    action_id: entry.action_id.clone(),
+                })
+                .collect(),
+            passive_ability_ids: document.passive_ability_ids.clone(),
         };
         insert_unique(&mut seen, &document.id, message, "chargen option")?;
     }
     Ok(encode_rows(seen))
+}
+
+fn starting_character_stats(
+    document: &source::StartingCharacterStatsDocument,
+) -> proto::StartingCharacterStats {
+    proto::StartingCharacterStats {
+        health: document.health,
+        max_health: document.max_health,
+        resource: Some(proto::StartingResource {
+            kind: document.resource.kind.clone(),
+            initial: Some(decimal(document.resource.initial)),
+            maximum: Some(decimal(document.resource.maximum)),
+        }),
+        innate: document
+            .innate
+            .iter()
+            .map(|entry| proto::ExactStatEntry {
+                stat: entry.stat.clone(),
+                value: Some(decimal(entry.value)),
+            })
+            .collect(),
+        armor: Some(decimal(document.armor)),
+        resistances: document
+            .resistances
+            .iter()
+            .map(|entry| proto::ExactStatEntry {
+                stat: entry.stat.clone(),
+                value: Some(decimal(entry.value)),
+            })
+            .collect(),
+        hit_dice: Some(decimal(document.hit_dice)),
+        mana_dice: Some(decimal(document.mana_dice)),
+        base_stat_value: document.base_stat_value.map(decimal),
+        weapon_dps_default: document.weapon_dps_default.map(decimal),
+        fairy_scaler: document.fairy_scaler.map(decimal),
+        mainhand: Some(weapon_profile(&document.mainhand)),
+        ranged: Some(weapon_profile(&document.ranged)),
+    }
+}
+
+fn weapon_profile(document: &source::WeaponProfileDocument) -> proto::WeaponProfile {
+    proto::WeaponProfile {
+        minimum_damage: Some(decimal(document.minimum_damage)),
+        maximum_damage: Some(decimal(document.maximum_damage)),
+        speed_ms: Some(decimal(document.speed_ms)),
+    }
 }
 
 /// Compiles the item definitions.
@@ -1575,6 +1789,7 @@ fn item_rows(tree: &SourceTree, locales: &LocaleIndex, keep_extra: bool) -> Resu
             stack_limit: document.stack_limit.unwrap_or_default(),
             vendor_sell: price.sell,
             vendor_buy: price.buy,
+            curse_eligible: document.curse_eligible,
             extra: extra_map(&document.extra, keep_extra)?,
         };
         insert_unique(&mut seen, &document.id, message, "item")?;
