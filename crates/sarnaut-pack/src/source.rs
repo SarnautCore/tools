@@ -536,6 +536,10 @@ pub struct QuestCounterDocument {
 pub struct ScriptTriggerDocument {
     pub id: String,
     pub zone: String,
+    /// True when map machinery outside the quest-script graph attaches this
+    /// trigger. Used only to seed the reachability census.
+    #[serde(default)]
+    pub entrypoint: bool,
     pub root: ScriptNodeDocument,
     #[serde(default)]
     pub extra: BTreeMap<String, Value>,

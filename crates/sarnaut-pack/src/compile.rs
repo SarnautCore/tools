@@ -855,6 +855,7 @@ fn script_node(
             document.key
         ),
     };
+    validate_implemented_opcode(document, check.row_id)?;
 
     let mut fields = Vec::with_capacity(document.fields.len());
     for (index, field) in document.fields.iter().enumerate() {
@@ -889,6 +890,166 @@ fn script_node(
         tier: tier as i32,
         fields,
     })
+}
+
+/// Field contracts for opcodes promoted after the M3 semantics audit. The
+/// extractor writes this canonical shape, but the compiler repeats the check
+/// because private rows may be curated by hand between those two boundaries.
+fn validate_implemented_opcode(node: &source::ScriptNodeDocument, row_id: &str) -> Result<()> {
+    use source::ScriptValueDocument;
+
+    let names = || {
+        node.fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>()
+    };
+    let field = |name: &str| {
+        node.fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| &field.value)
+            .with_context(|| {
+                format!(
+                    "script row {row_id}: node {} {} requires field {name}",
+                    node.key, node.opcode
+                )
+            })
+    };
+    let fail_shape = |expected: &str| {
+        anyhow::anyhow!(
+            "script row {row_id}: node {} {} fields {:?}, want {expected}",
+            node.key,
+            node.opcode,
+            names()
+        )
+    };
+    let is_integer = |value: &ScriptValueDocument| value.integer.is_some();
+    let is_boolean = |value: &ScriptValueDocument| value.boolean.is_some();
+    let is_decimal = |value: &ScriptValueDocument| value.decimal.is_some();
+    let is_list = |value: &ScriptValueDocument| value.list.is_some();
+
+    match node.opcode.as_str() {
+        "DestinationLocator" => {
+            if names() != ["locator", "yaw"] {
+                return Err(fail_shape("[locator, yaw]"));
+            }
+            let Some(locator) = field("locator")?.node.as_deref() else {
+                bail!(
+                    "script row {row_id}: node {} DestinationLocator.locator is not a MapPointer record",
+                    node.key
+                );
+            };
+            if locator.family != "basic"
+                || locator.opcode != "Struct"
+                || locator
+                    .fields
+                    .iter()
+                    .map(|field| field.name.as_str())
+                    .collect::<Vec<_>>()
+                    != ["map", "scriptID"]
+            {
+                bail!(
+                    "script row {row_id}: node {} DestinationLocator.locator is not canonical MapPointer<Locator>",
+                    node.key
+                );
+            }
+            let map = &locator.fields[0].value;
+            if !map.reference.as_ref().is_some_and(|reference| {
+                reference.row_type.as_deref() == Some("map-resource") && !reference.id.is_empty()
+            }) {
+                bail!(
+                    "script row {row_id}: node {} DestinationLocator.locator.map is not a map-resource reference",
+                    node.key
+                );
+            }
+            if locator.fields[1]
+                .value
+                .text
+                .as_deref()
+                .is_none_or(str::is_empty)
+            {
+                bail!(
+                    "script row {row_id}: node {} DestinationLocator.locator.scriptID is empty or not text",
+                    node.key
+                );
+            }
+            if !is_integer(field("yaw")?) {
+                return Err(fail_shape("integer yaw"));
+            }
+        }
+        "Guard" => {
+            if names() != ["noticeTarget", "scanRadius"]
+                || !is_boolean(field("noticeTarget")?)
+                || !is_decimal(field("scanRadius")?)
+            {
+                return Err(fail_shape("[boolean noticeTarget, decimal scanRadius]"));
+            }
+        }
+        "PredicateIsAvatar" => {
+            if !node.fields.is_empty() {
+                return Err(fail_shape("no fields"));
+            }
+        }
+        "ScalerAllInputDamage" => {
+            if names()
+                != [
+                    "attackerConditions",
+                    "onlyFromCaster",
+                    "scaler",
+                    "stackCount",
+                ]
+                || !is_list(field("attackerConditions")?)
+                || !is_boolean(field("onlyFromCaster")?)
+                || !is_integer(field("stackCount")?)
+                || field("stackCount")?.integer.is_some_and(|count| count < 1)
+            {
+                return Err(fail_shape(
+                    "[list attackerConditions, boolean onlyFromCaster, scaler node, positive integer stackCount]",
+                ));
+            }
+            require_scaler_node(field("scaler")?, row_id, node)?;
+        }
+        "ScalerAllOutputDamage" => {
+            let got = names();
+            if got != ["scaler", "stackCount"] && got != ["group", "scaler", "stackCount"] {
+                return Err(fail_shape("[optional group, scaler, stackCount]"));
+            }
+            if let Ok(group) = field("group")
+                && group.reference.is_none()
+                && group.text.is_none()
+            {
+                return Err(fail_shape("group as a content reference or group id"));
+            }
+            if !is_integer(field("stackCount")?)
+                || field("stackCount")?.integer.is_some_and(|count| count < 1)
+            {
+                return Err(fail_shape("positive integer stackCount"));
+            }
+            require_scaler_node(field("scaler")?, row_id, node)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn require_scaler_node(
+    value: &source::ScriptValueDocument,
+    row_id: &str,
+    owner: &source::ScriptNodeDocument,
+) -> Result<()> {
+    if value
+        .node
+        .as_deref()
+        .is_none_or(|scaler| scaler.family != "scaler")
+    {
+        bail!(
+            "script row {row_id}: node {} {}.scaler is not a scaler node",
+            owner.key,
+            owner.opcode
+        );
+    }
+    Ok(())
 }
 
 /// Converts one script value, enforcing that exactly one union member is set.
