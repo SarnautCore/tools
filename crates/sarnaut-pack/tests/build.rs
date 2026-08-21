@@ -712,6 +712,37 @@ fn decode<M: Message + Default>(pack: &std::path::Path, name: &str) -> Vec<M> {
 }
 
 #[test]
+fn item_required_level_migration_keeps_positive_wire_bytes_and_signed_values() {
+    let positive = proto::Item {
+        required_level: 39,
+        ..Default::default()
+    };
+    // Field 5 encoded as a positive varint is identical for uint32 and int32,
+    // so existing positive rows remain readable across the schema migration.
+    assert_eq!(positive.encode_to_vec(), vec![0x28, 0x27]);
+    assert_eq!(
+        proto::Item::decode([0x28, 0x27].as_slice())
+            .expect("decode pre-migration positive row")
+            .required_level,
+        39
+    );
+
+    for required_level in [-1, -2] {
+        let encoded = proto::Item {
+            required_level,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        assert_eq!(
+            proto::Item::decode(encoded.as_slice())
+                .expect("decode signed required level")
+                .required_level,
+            required_level
+        );
+    }
+}
+
+#[test]
 fn a_source_tree_with_no_loot_documents_carries_no_item_or_loot_table() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));
@@ -745,8 +776,18 @@ fn loot_documents_compile_into_the_item_and_loot_tables() {
     );
     assert_eq!(items[0].stack_limit, 20);
     assert_eq!(items[0].vendor_sell, 4);
+    assert_eq!(items[0].required_level, -1);
     // Rule 5.7.6: a limit of one is a legal authored value, not a missing one.
     assert_eq!(items[1].stack_limit, 1);
+    assert_eq!(items[1].required_level, -2);
+
+    // The runtime reader sees the same signed values after protobuf encoding.
+    // In classic 1.1 these are authored sentinels, not unsigned parse errors.
+    for item in &items {
+        let bytes = item.encode_to_vec();
+        let decoded = proto::Item::decode(bytes.as_slice()).expect("decode signed item gate");
+        assert_eq!(decoded.required_level, item.required_level);
+    }
 
     let tables: Vec<proto::LootTable> = decode(&out, "loot-tables");
     assert_eq!(tables.len(), 1);

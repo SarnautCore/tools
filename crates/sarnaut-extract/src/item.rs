@@ -236,7 +236,7 @@ mod tests {
 <gameMechanics.constructor.schemes.item.ItemResource>
   <Header><resourceId>42</resourceId></Header>
   <name href="GibberlingFur.txt"/><description href="GibberlingFur.Description.txt"/>
-  <slot>RANGED</slot><level>7</level><requiredLevel>5</requiredLevel>
+  <slot>RANGED</slot><level>7</level><requiredLevel>-1</requiredLevel>
   <quality href="/Mechanics/ItemQualities/Common.xdb#xpointer(/quality)"/>
   <functionalPart type="ItemBonus"><statBonuses><Item><stat>IS_Luck</stat><value>3</value></Item></statBonuses><minDamage>2</minDamage><maxDamage>4</maxDamage></functionalPart>
   <stackLimit>20</stackLimit><sellPrice>11</sellPrice><buyPrice>22</buyPrice>
@@ -259,6 +259,7 @@ mod tests {
             fs::read_to_string(output.path().join("items/junk/gibberling-fur.yaml")).unwrap();
         assert!(yaml.contains("id: item.junk.gibberling-fur"));
         assert!(yaml.contains("stat: IS_Luck"));
+        assert!(yaml.contains("required_level: -1"));
         assert!(yaml.contains("mystery:"));
         assert!(yaml.contains("@answer"));
         assert!(yaml.contains("nested: kept"));
