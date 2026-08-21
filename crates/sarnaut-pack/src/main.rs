@@ -202,6 +202,10 @@ fn print_summary(pack: &CompiledPack) {
             "scripts  {} nodes: implemented={implemented}, inert-and-counted={inert}, refused={refused}",
             scripts.nodes
         );
+        println!(
+            "reachable {} nodes across {}/{} trigger rows",
+            scripts.reachable_nodes, scripts.reachable_script_triggers, scripts.script_triggers
+        );
         for (tier, opcodes) in [
             ("implemented", &scripts.implemented),
             ("inert-and-counted", &scripts.inert_and_counted),

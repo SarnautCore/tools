@@ -8,6 +8,8 @@
 //! sits beside `manifest.json`, is not an input to the digest, and is a
 //! private-path artifact like the pack itself.
 
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
 use anyhow::{Context, Result};
 use serde::Serialize;
 
@@ -45,6 +47,14 @@ pub struct ScriptCensusReport {
     pub implemented: std::collections::BTreeMap<String, usize>,
     pub inert_and_counted: std::collections::BTreeMap<String, usize>,
     pub refused: std::collections::BTreeMap<String, usize>,
+    /// Trigger rows reached from quest roots by following canonical trigger
+    /// references. Root-element discovery also retains orphan rows, so this is
+    /// deliberately separate from `script_triggers`.
+    pub reachable_script_triggers: usize,
+    pub reachable_nodes: usize,
+    pub reachable_implemented: BTreeMap<String, usize>,
+    pub reachable_inert_and_counted: BTreeMap<String, usize>,
+    pub reachable_refused: BTreeMap<String, usize>,
 }
 
 impl ScriptCensusReport {
@@ -59,6 +69,11 @@ impl ScriptCensusReport {
             implemented: Default::default(),
             inert_and_counted: Default::default(),
             refused: Default::default(),
+            reachable_script_triggers: 0,
+            reachable_nodes: 0,
+            reachable_implemented: Default::default(),
+            reachable_inert_and_counted: Default::default(),
+            reachable_refused: Default::default(),
         };
         for document in &tree.quest_scripts {
             for node in document
@@ -67,11 +82,48 @@ impl ScriptCensusReport {
                 .chain(&document.trigger_agents)
             {
                 census.count(node);
+                census.count_reachable(node);
             }
         }
         for document in &tree.script_triggers {
             census.count(&document.root);
         }
+        let triggers: BTreeMap<_, _> = tree
+            .script_triggers
+            .iter()
+            .map(|document| (document.id.as_str(), document))
+            .collect();
+        let mut queue = VecDeque::new();
+        queue.extend(
+            tree.script_triggers
+                .iter()
+                .filter(|document| document.entrypoint)
+                .map(|document| document.id.clone()),
+        );
+        for document in &tree.quest_scripts {
+            for node in document
+                .start_impacts
+                .iter()
+                .chain(&document.trigger_agents)
+            {
+                enqueue_trigger_refs(node, &mut queue);
+            }
+        }
+        let mut reached = BTreeSet::new();
+        while let Some(id) = queue.pop_front() {
+            if !reached.insert(id.clone()) {
+                continue;
+            }
+            let Some(document) = triggers.get(id.as_str()) else {
+                continue;
+            };
+            census.count_reachable(&document.root);
+            enqueue_trigger_refs(&document.root, &mut queue);
+        }
+        census.reachable_script_triggers = reached
+            .iter()
+            .filter(|id| triggers.contains_key(id.as_str()))
+            .count();
         Some(census)
     }
 
@@ -98,6 +150,41 @@ impl ScriptCensusReport {
             }
         }
     }
+
+    fn count_reachable(&mut self, node: &crate::source::ScriptNodeDocument) {
+        self.reachable_nodes += 1;
+        let bucket = match node.tier.as_str() {
+            "implemented" => &mut self.reachable_implemented,
+            "inert-and-counted" => &mut self.reachable_inert_and_counted,
+            _ => &mut self.reachable_refused,
+        };
+        *bucket.entry(node.opcode.clone()).or_insert(0) += 1;
+        for field in &node.fields {
+            self.count_reachable_value(&field.value);
+        }
+    }
+
+    fn count_reachable_value(&mut self, value: &crate::source::ScriptValueDocument) {
+        if let Some(node) = &value.node {
+            self.count_reachable(node);
+        }
+        if let Some(list) = &value.list {
+            for entry in list {
+                self.count_reachable_value(entry);
+            }
+        }
+    }
+}
+
+fn enqueue_trigger_refs(node: &crate::source::ScriptNodeDocument, queue: &mut VecDeque<String>) {
+    let mut references = Vec::new();
+    crate::source::collect_script_refs(node, &mut references);
+    queue.extend(
+        references
+            .into_iter()
+            .filter(|reference| reference.row_type.as_deref() == Some("trigger"))
+            .map(|reference| reference.id.clone()),
+    );
 }
 
 #[derive(Debug, Serialize)]

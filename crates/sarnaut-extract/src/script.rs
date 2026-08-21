@@ -96,6 +96,11 @@ struct TriggerDocument {
     source_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     resource_id: Option<u64>,
+    /// The map attaches this trigger outside the quest-script graph, for
+    /// example through a SpawnTunerMobImpacts row. It is therefore a census
+    /// root even when no quest node names it directly.
+    #[serde(skip_serializing_if = "is_false")]
+    entrypoint: bool,
     root: ScriptNode,
     #[serde(rename = "_source")]
     source: Provenance,
@@ -154,6 +159,10 @@ struct Reference {
     href: Option<String>,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 // --- extraction -------------------------------------------------------------
 
 pub fn extract_scripts(name: &str, options: &ExtractionOptions) -> Result<ScriptSummary> {
@@ -165,6 +174,8 @@ pub fn extract_scripts(name: &str, options: &ExtractionOptions) -> Result<Script
         zone: resolved.zone.clone(),
         ..ScriptSummary::default()
     };
+    let external_entrypoints =
+        map_trigger_entrypoints(&resolved.map_dir, &options.src, &zone_slug)?;
 
     // Triggers the quest trees referenced, id -> source-relative path. A queue
     // rather than a set walk, because a trigger can attach further triggers.
@@ -281,6 +292,7 @@ pub fn extract_scripts(name: &str, options: &ExtractionOptions) -> Result<Script
             zone: format!("zone.{zone_slug}"),
             source_type: TRIGGER_RESOURCE.to_owned(),
             resource_id: resource_id(root),
+            entrypoint: external_entrypoints.contains(&trigger_id),
             root: node,
             source: xdb.source,
         };
@@ -394,12 +406,13 @@ impl Converter<'_> {
         let opcode = type_name.rsplit('.').next().unwrap_or(type_name).to_owned();
         let tier = tier_for(&opcode);
         self.count_tier(tier, &opcode);
+        let fields = self.fields_of(element, key)?;
         Ok(ScriptNode {
             key: key.to_owned(),
             family: family_of(type_name).to_owned(),
+            fields: canonical_opcode_fields(&opcode, key, fields)?,
             opcode,
             tier: tier.to_owned(),
-            fields: self.fields_of(element, key)?,
         })
     }
 
@@ -621,38 +634,270 @@ impl Converter<'_> {
     /// Trigger ids are zone-scoped: this pack is the unit of self-containment,
     /// and a shared QuestSpells trigger is re-minted per zone that reaches it.
     fn trigger_id(&self, absolute: &str) -> String {
-        let parts: Vec<&str> = absolute
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .collect();
-        let file = parts
-            .last()
-            .map(|name| slug(strip_xdb_suffix(name)))
-            .unwrap_or_default();
-        match parts.as_slice() {
-            ["World", "Quests", zone, quest, ..] => {
-                format!(
-                    "trigger.{}.{}.{file}",
-                    canonical_zone_slug(zone),
-                    slug(quest)
-                )
+        trigger_id(self.zone_slug, absolute)
+    }
+}
+
+/// Trigger rows referenced by map machinery rather than by a quest node are
+/// still execution roots. This catches SpawnTunerMobImpacts without teaching
+/// the runtime pack about the original SpawnTuner format.
+fn map_trigger_entrypoints(
+    map_dir: &std::path::Path,
+    source_root: &std::path::Path,
+    zone_slug: &str,
+) -> Result<BTreeSet<String>> {
+    let mut entrypoints = BTreeSet::new();
+    for path in sorted_xdb_files(map_dir)? {
+        let xdb = read_xdb(&path, source_root)?;
+        let xml = parse_document(&xdb.text, &path)?;
+        let document_dir = parent_dir(&xdb.source.path);
+        for element in xml.descendants().filter(Node::is_element) {
+            for attribute in element
+                .attributes()
+                .filter(|attribute| attribute.name() == "href")
+            {
+                let href = attribute.value();
+                let (path_part, marker) = match href.split_once('#') {
+                    Some((path, pointer)) => (path, Some(pointer)),
+                    None => (href, None),
+                };
+                let is_trigger = marker.is_some_and(|pointer| pointer.contains("TriggerResource"))
+                    || marker_of(path_part).as_deref() == Some("TriggerResource");
+                if !is_trigger || path_part.is_empty() {
+                    continue;
+                }
+                let absolute = if let Some(path) = path_part.strip_prefix('/') {
+                    path.to_owned()
+                } else {
+                    normalize(&format!("{document_dir}/{path_part}"))
+                };
+                entrypoints.insert(trigger_id(zone_slug, &absolute));
             }
-            ["Characters" | "Creatures", family, "Instances", zone, ..] => {
-                format!(
-                    "trigger.{}.{}.{file}",
-                    canonical_zone_slug(zone),
-                    slug(family)
-                )
-            }
-            ["Mechanics", "Spells", "QuestSpells", directory, ..] => {
-                format!("trigger.{}.{}.{file}", self.zone_slug, slug(directory))
-            }
-            _ => format!(
-                "trigger.{}.{}",
-                self.zone_slug,
-                slug_path(&parts).replace('.', "-")
-            ),
         }
+    }
+    Ok(entrypoints)
+}
+
+fn trigger_id(zone_slug: &str, absolute: &str) -> String {
+    let parts: Vec<&str> = absolute
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let file = parts
+        .last()
+        .map(|name| slug(strip_xdb_suffix(name)))
+        .unwrap_or_default();
+    match parts.as_slice() {
+        ["World", "Quests", zone, quest, ..] => {
+            format!(
+                "trigger.{}.{}.{file}",
+                canonical_zone_slug(zone),
+                slug(quest)
+            )
+        }
+        ["Characters" | "Creatures", family, "Instances", zone, ..] => {
+            format!(
+                "trigger.{}.{}.{file}",
+                canonical_zone_slug(zone),
+                slug(family)
+            )
+        }
+        ["Mechanics", "Spells", "QuestSpells", directory, ..] => {
+            format!("trigger.{zone_slug}.{}.{file}", slug(directory))
+        }
+        _ => format!(
+            "trigger.{}.{}",
+            zone_slug,
+            slug_path(&parts).replace('.', "-")
+        ),
+    }
+}
+
+/// Normalizes the five audited M3 script opcodes at the source boundary. The
+/// runtime consequently receives one field shape even when the reflection
+/// defaults were omitted from the XDB. These checks also stop a malformed
+/// source row before it can be blessed as `implemented`.
+fn canonical_opcode_fields(
+    opcode: &str,
+    key: &str,
+    mut fields: Vec<ScriptField>,
+) -> Result<Vec<ScriptField>> {
+    match opcode {
+        "DestinationLocator" => {
+            let locator = required_field(&fields, "locator", key, opcode)?;
+            let Some(locator) = locator.value.node.as_deref() else {
+                bail!("{key}: {opcode}.locator is not a MapPointer record");
+            };
+            if locator.family != "basic" || locator.opcode != "Struct" {
+                bail!("{key}: {opcode}.locator is not a MapPointer record");
+            }
+            let map = required_field(&locator.fields, "map", &locator.key, "MapPointer")?;
+            let Some(map) = map.value.reference.as_ref() else {
+                bail!("{key}: {opcode}.locator.map is not a content reference");
+            };
+            if map.row_type.as_deref() != Some("map-resource") {
+                bail!("{key}: {opcode}.locator.map does not reference a map-resource");
+            }
+            let script_id =
+                required_field(&locator.fields, "scriptID", &locator.key, "MapPointer")?;
+            if script_id.value.text.as_deref().is_none_or(str::is_empty) {
+                bail!("{key}: {opcode}.locator.scriptID is empty or not text");
+            }
+            push_default(&mut fields, "yaw", integer_value(0));
+            require_integer(&fields, "yaw", key, opcode)?;
+        }
+        "Guard" => {
+            push_default(&mut fields, "noticeTarget", boolean_value(false));
+            push_default(
+                &mut fields,
+                "scanRadius",
+                decimal_value(Decimal {
+                    mantissa: 425,
+                    scale: 1,
+                }),
+            );
+            require_boolean(&fields, "noticeTarget", key, opcode)?;
+            let radius = required_field(&fields, "scanRadius", key, opcode)?;
+            if let Some(integer) = radius.value.integer {
+                let radius = fields
+                    .iter_mut()
+                    .find(|field| field.name == "scanRadius")
+                    .expect("required field exists");
+                radius.value = decimal_value(Decimal {
+                    mantissa: integer,
+                    scale: 0,
+                });
+            } else if radius.value.decimal.is_none() {
+                bail!("{key}: {opcode}.scanRadius is not decimal");
+            }
+        }
+        "PredicateIsAvatar" => {
+            // `toLog` is reflection/debug metadata. The predicate is
+            // parameter-free and the server must never interpret this bit.
+            fields.retain(|field| field.name != "toLog");
+            if !fields.is_empty() {
+                bail!("{key}: {opcode} is parameter-free");
+            }
+        }
+        "ScalerAllInputDamage" => {
+            push_default(&mut fields, "attackerConditions", list_value(Vec::new()));
+            push_default(&mut fields, "onlyFromCaster", boolean_value(false));
+            push_default(&mut fields, "stackCount", integer_value(1));
+            require_list(&fields, "attackerConditions", key, opcode)?;
+            require_boolean(&fields, "onlyFromCaster", key, opcode)?;
+            require_scaler(&fields, key, opcode)?;
+            require_integer(&fields, "stackCount", key, opcode)?;
+        }
+        "ScalerAllOutputDamage" => {
+            push_default(&mut fields, "stackCount", integer_value(1));
+            require_scaler(&fields, key, opcode)?;
+            require_integer(&fields, "stackCount", key, opcode)?;
+            if let Some(group) = fields.iter().find(|field| field.name == "group")
+                && group.value.reference.is_none()
+                && group.value.text.is_none()
+            {
+                bail!("{key}: {opcode}.group is not a content reference or group id");
+            }
+        }
+        _ => return Ok(fields),
+    }
+    fields.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
+    Ok(fields)
+}
+
+fn required_field<'a>(
+    fields: &'a [ScriptField],
+    name: &str,
+    key: &str,
+    opcode: &str,
+) -> Result<&'a ScriptField> {
+    fields
+        .iter()
+        .find(|field| field.name == name)
+        .with_context(|| format!("{key}: {opcode} requires field {name}"))
+}
+
+fn push_default(fields: &mut Vec<ScriptField>, name: &str, value: ScriptValue) {
+    if fields.iter().all(|field| field.name != name) {
+        fields.push(ScriptField {
+            name: name.to_owned(),
+            value,
+        });
+    }
+}
+
+fn require_boolean(fields: &[ScriptField], name: &str, key: &str, opcode: &str) -> Result<()> {
+    if required_field(fields, name, key, opcode)?
+        .value
+        .boolean
+        .is_none()
+    {
+        bail!("{key}: {opcode}.{name} is not boolean");
+    }
+    Ok(())
+}
+
+fn require_integer(fields: &[ScriptField], name: &str, key: &str, opcode: &str) -> Result<()> {
+    if required_field(fields, name, key, opcode)?
+        .value
+        .integer
+        .is_none()
+    {
+        bail!("{key}: {opcode}.{name} is not integer");
+    }
+    Ok(())
+}
+
+fn require_list(fields: &[ScriptField], name: &str, key: &str, opcode: &str) -> Result<()> {
+    if required_field(fields, name, key, opcode)?
+        .value
+        .list
+        .is_none()
+    {
+        bail!("{key}: {opcode}.{name} is not a list");
+    }
+    Ok(())
+}
+
+fn require_scaler(fields: &[ScriptField], key: &str, opcode: &str) -> Result<()> {
+    let field = required_field(fields, "scaler", key, opcode)?;
+    let Some(scaler) = field.value.node.as_deref() else {
+        bail!("{key}: {opcode}.scaler is not a scaler node");
+    };
+    if scaler.family != "scaler" {
+        bail!(
+            "{key}: {opcode}.scaler has family {}, want scaler",
+            scaler.family
+        );
+    }
+    Ok(())
+}
+
+fn integer_value(value: i64) -> ScriptValue {
+    ScriptValue {
+        integer: Some(value),
+        ..ScriptValue::default()
+    }
+}
+
+fn boolean_value(value: bool) -> ScriptValue {
+    ScriptValue {
+        boolean: Some(value),
+        ..ScriptValue::default()
+    }
+}
+
+fn decimal_value(value: Decimal) -> ScriptValue {
+    ScriptValue {
+        decimal: Some(value),
+        ..ScriptValue::default()
+    }
+}
+
+fn list_value(value: Vec<ScriptValue>) -> ScriptValue {
+    ScriptValue {
+        list: Some(value),
+        ..ScriptValue::default()
     }
 }
 
@@ -1007,5 +1252,85 @@ mod tests {
             !dress.contains("gameMechanics.elements.impacts.ImpactIncreaseQuestCount"),
             "a namespaced opcode leaked into the authored node: {dress}"
         );
+    }
+
+    #[test]
+    fn audited_opcodes_extract_with_canonical_defaults() {
+        let (source, output, options) = fixture_options();
+        write(
+            &source.path().join("Maps/TestMap/Zones/TestZone/Zone.xdb"),
+            "<ZoneResource/>",
+        );
+        write(
+            &source.path().join("Maps/TestMap/SpawnTuners/Tuner.xdb"),
+            r#"<SpawnTunerMobImpacts><trigger href="/World/Quests/TestZone/Quest_1/Audit.(TriggerResource).xdb#xpointer(/gameMechanics.constructor.schemes.quest.trigger.TriggerResource)" /></SpawnTunerMobImpacts>"#,
+        );
+        write(
+            &source
+                .path()
+                .join("World/Quests/TestZone/Quest_1/Quest_1.xdb"),
+            r#"<gameMechanics.constructor.schemes.quest.QuestResource>
+  <startImpacts>
+    <Item type="gameMechanics.elements.impacts.ImpactTurnMob">
+      <destination type="gameMechanics.map.destination.DestinationLocator">
+        <locator><scriptID>Arrival</scriptID><map href="/Maps/TestMap/MapResource.xdb#xpointer(/mapLoader.MapResource)" /></locator>
+      </destination>
+    </Item>
+    <Item type="gameMechanics.elements.impacts.ImpactIfTarget">
+      <predicate type="gameMechanics.elements.predicates.PredicateIsAvatar"><toLog>true</toLog></predicate>
+    </Item>
+  </startImpacts>
+  <triggerAgents><Item type="gameMechanics.elements.trigger.TriggerAgentSelf"><trigger href="Audit.(TriggerResource).xdb#xpointer(/gameMechanics.constructor.schemes.quest.trigger.TriggerResource)" /></Item></triggerAgents>
+</gameMechanics.constructor.schemes.quest.QuestResource>"#,
+        );
+        write(
+            &source
+                .path()
+                .join("World/Quests/TestZone/Quest_1/Audit.(TriggerResource).xdb"),
+            r#"<gameMechanics.constructor.schemes.quest.trigger.TriggerResource>
+  <effects>
+    <Item type="gameMechanics.elements.effects.Guard" />
+    <Item type="gameMechanics.elements.effects.ScalerAllInputDamage"><scaler type="gameMechanics.elements.scalers.LinearEffectScaler"><coeff>-0.9</coeff></scaler></Item>
+    <Item type="gameMechanics.elements.effects.ScalerAllOutputDamage"><scaler type="gameMechanics.elements.scalers.LinearEffectScaler"><coeff>100</coeff></scaler></Item>
+  </effects>
+</gameMechanics.constructor.schemes.quest.trigger.TriggerResource>"#,
+        );
+
+        let summary = extract_scripts("TestZone", &options).expect("extract audited opcodes");
+        assert_eq!(summary.refused, 0, "promoted opcodes stayed refused");
+
+        let quest = fs::read_to_string(
+            output
+                .path()
+                .join("zones/test-zone/scripts/quests/quest-1.yaml"),
+        )
+        .expect("read quest script");
+        assert!(quest.contains("opcode: DestinationLocator\n"), "{quest}");
+        assert!(quest.contains("- name: yaw\n"), "{quest}");
+        assert!(quest.contains("opcode: PredicateIsAvatar\n"), "{quest}");
+        assert!(
+            !quest.contains("name: toLog"),
+            "PredicateIsAvatar retained source-only toLog: {quest}"
+        );
+
+        let trigger = fs::read_to_string(
+            output
+                .path()
+                .join("zones/test-zone/scripts/triggers/quest-1.audit.yaml"),
+        )
+        .expect("read audit trigger");
+        assert!(trigger.contains("entrypoint: true"), "{trigger}");
+        for expected in [
+            "opcode: Guard",
+            "name: noticeTarget",
+            "mantissa: 425",
+            "opcode: ScalerAllInputDamage",
+            "name: attackerConditions",
+            "opcode: ScalerAllOutputDamage",
+            "name: stackCount",
+        ] {
+            assert!(trigger.contains(expected), "missing {expected}: {trigger}");
+        }
+        assert_eq!(trigger.matches("tier: implemented").count(), 6, "{trigger}");
     }
 }
