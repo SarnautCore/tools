@@ -27,7 +27,7 @@ fn promoted_opcodes_round_trip_and_report_seven_reachable_of_nine_total() {
     let second = workspace.path().join("second");
     compile::build(&common::options(source.clone()), &first).expect("first pack build");
     compile::build(&common::options(source), &second).expect("second pack build");
-    for table_name in ["quest-scripts", "script-triggers"] {
+    for table_name in ["quest-scripts", "script-triggers", "map-locators"] {
         assert_eq!(
             fs::read(first.join(format!("tables/{table_name}.sptbl"))).expect("first table"),
             fs::read(second.join(format!("tables/{table_name}.sptbl"))).expect("second table"),
@@ -53,6 +53,36 @@ fn promoted_opcodes_round_trip_and_report_seven_reachable_of_nine_total() {
             .map(|field| field.name.as_str())
             .collect::<Vec<_>>(),
         ["locator", "yaw"]
+    );
+    let locator_record = match destination.fields[0]
+        .value
+        .as_ref()
+        .and_then(|value| value.value.as_ref())
+    {
+        Some(proto::script_value::Value::Node(node)) => node,
+        other => panic!("DestinationLocator.locator is not a node: {other:?}"),
+    };
+    let map_reference = match locator_record.fields[0]
+        .value
+        .as_ref()
+        .and_then(|value| value.value.as_ref())
+    {
+        Some(proto::script_value::Value::Reference(reference)) => reference,
+        other => panic!("MapPointer.map is not a reference: {other:?}"),
+    };
+    assert_eq!(map_reference.id, "quay");
+    assert_eq!(map_reference.row_type, "map");
+    assert!(!map_reference.id.starts_with("ext."));
+    let locators: Vec<proto::MapLocator> = decode(&first, "map-locators");
+    assert_eq!(locators.len(), 2);
+    assert_eq!(locators[0].map_id, "quay");
+    assert_eq!(locators[0].script_id, "Arrival");
+    assert_eq!(locators[1].script_id, "Firewall");
+    assert_eq!(
+        table::validate(&fs::read(first.join("tables/map-locators.sptbl")).expect("locator table"))
+            .expect("validate locator table")
+            .row_type_id,
+        17
     );
 
     let report: serde_json::Value = serde_json::from_str(
@@ -81,6 +111,84 @@ fn promoted_opcodes_round_trip_and_report_seven_reachable_of_nine_total() {
     assert_eq!(report["scripts"]["refused"], serde_json::json!({}));
 }
 
+#[test]
+fn destination_locator_missing_from_the_map_index_fails_the_build() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    write_rows(&source);
+    let placements = source.join("classic/zones/harbour-watch/spawns/placements/quay.yaml");
+    let text = fs::read_to_string(&placements)
+        .expect("placement fixture")
+        .replace("script_id: Firewall", "script_id: SomewhereElse");
+    fs::write(&placements, text).expect("write missing locator fixture");
+
+    let error = compile::build(&common::options(source), &workspace.path().join("pack"))
+        .expect_err("absent DestinationLocator target must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("references absent map locator quay/Firewall"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn duplicate_map_and_script_id_fails_even_when_positions_differ() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    write_rows(&source);
+    let placements = source.join("classic/zones/harbour-watch/spawns/placements/quay.yaml");
+    let mut text = fs::read_to_string(&placements).expect("placement fixture");
+    text.push_str("  - script_id: Arrival\n    position: { x: 99.0, y: 98.0, z: 97.0 }\n");
+    fs::write(&placements, text).expect("write duplicate locator fixture");
+
+    let error = compile::build(&common::options(source), &workspace.path().join("pack"))
+        .expect_err("duplicate locator identity must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("map locator id quay/Arrival is declared twice"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn locator_row_key_components_reject_source_paths() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    write_rows(&source);
+    let placements = source.join("classic/zones/harbour-watch/spawns/placements/quay.yaml");
+    let text = fs::read_to_string(&placements)
+        .expect("placement fixture")
+        .replace("script_id: Arrival", "script_id: Maps\\Arrival");
+    fs::write(&placements, text).expect("write invalid locator fixture");
+
+    let error = compile::build(&common::options(source), &workspace.path().join("pack"))
+        .expect_err("source-shaped locator component must fail");
+    assert!(error.to_string().contains("a path separator"), "{error:#}");
+}
+
+#[test]
+fn locator_map_resource_must_match_the_placement_map() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    write_rows(&source);
+    let placements = source.join("classic/zones/harbour-watch/spawns/placements/quay.yaml");
+    let text = fs::read_to_string(&placements)
+        .expect("placement fixture")
+        .replace("map_resource: quay", "map_resource: tide-steps");
+    fs::write(&placements, text).expect("write map mismatch fixture");
+
+    let error = compile::build(&common::options(source), &workspace.path().join("pack"))
+        .expect_err("map identity mismatch must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("map_resource \"tide-steps\" differs from map \"quay\""),
+        "{error:#}"
+    );
+}
+
 fn decode<T: Message + Default>(root: &std::path::Path, name: &str) -> Vec<T> {
     table::rows(&fs::read(root.join(format!("tables/{name}.sptbl"))).expect("read table"))
         .expect("decode table")
@@ -93,6 +201,12 @@ fn write_rows(source: &std::path::Path) {
     let root = source.join("classic/zones/harbour-watch/scripts");
     fs::create_dir_all(root.join("quests")).expect("quest scripts dir");
     fs::create_dir_all(root.join("triggers")).expect("trigger scripts dir");
+    let placements = source.join("classic/zones/harbour-watch/spawns/placements/quay.yaml");
+    let mut placement_text = fs::read_to_string(&placements).expect("placement fixture");
+    placement_text.push_str(
+        "map_resource: quay\nlocators:\n  - script_id: Arrival\n    position: { x: 11.0, y: 12.0, z: 13.0 }\n  - script_id: Firewall\n    position: { x: 21.0, y: 22.0, z: 23.0 }\n",
+    );
+    fs::write(&placements, placement_text).expect("locator placement fixture");
     let trigger_agents = format!(
         "{}\n{}",
         trigger_agent(
@@ -183,8 +297,8 @@ fn destination(key: &str, script_id: &str) -> String {
               - name: map
                 value:
                   reference:
-                    id: ext.maps.harbour-watch.map-resource
-                    row_type: map-resource
+                    id: quay
+                    row_type: map
               - name: scriptID
                 value: {{text: {script_id}}}
       - name: yaw

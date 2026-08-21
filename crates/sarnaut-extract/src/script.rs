@@ -606,7 +606,7 @@ impl Converter<'_> {
             .map(|element| element.rsplit('.').next().unwrap_or(element).to_owned())
             .or_else(|| marker_of(&absolute));
 
-        let row_type = root_element.as_deref().map(row_type_slug);
+        let mut row_type = root_element.as_deref().map(row_type_slug);
 
         let id = match row_type.as_deref() {
             Some("trigger") => {
@@ -621,6 +621,10 @@ impl Converter<'_> {
             }
             Some("quest-count-id") => questcount_id(&absolute)
                 .with_context(|| format!("no QuestCountId id rule covers {absolute}"))?,
+            Some("map-resource") => {
+                row_type = Some("map".to_string());
+                map_resource_id(&absolute)?
+            }
             _ => canonical_id_from_source_path(&absolute).unwrap_or_else(|| {
                 let parts: Vec<&str> = absolute.split('/').collect();
                 let minted = format!("ext.{}", slug_path(&parts));
@@ -735,8 +739,8 @@ fn canonical_opcode_fields(
             let Some(map) = map.value.reference.as_ref() else {
                 bail!("{key}: {opcode}.locator.map is not a content reference");
             };
-            if map.row_type.as_deref() != Some("map-resource") {
-                bail!("{key}: {opcode}.locator.map does not reference a map-resource");
+            if map.row_type.as_deref() != Some("map") || map.id.is_empty() {
+                bail!("{key}: {opcode}.locator.map is not a canonical product map reference");
             }
             let script_id =
                 required_field(&locator.fields, "scriptID", &locator.key, "MapPointer")?;
@@ -803,6 +807,27 @@ fn canonical_opcode_fields(
     }
     fields.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
     Ok(fields)
+}
+
+/// Maps the one classic MapResource path shape to its source-free product id.
+/// An unfamiliar path fails closed instead of leaking an `ext.*` identity into
+/// authored script rows and, eventually, a runtime pack.
+fn map_resource_id(absolute: &str) -> Result<String> {
+    let parts: Vec<&str> = absolute
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() != 3
+        || !parts[0].eq_ignore_ascii_case("Maps")
+        || !parts[2].eq_ignore_ascii_case("MapResource.xdb")
+    {
+        bail!("map resource reference {absolute:?} is not Maps/<map>/MapResource.xdb");
+    }
+    let id = slug(parts[1]);
+    if id.is_empty() {
+        bail!("map resource reference {absolute:?} has no canonical product map id");
+    }
+    Ok(id)
 }
 
 fn required_field<'a>(
@@ -1307,6 +1332,10 @@ mod tests {
         .expect("read quest script");
         assert!(quest.contains("opcode: DestinationLocator\n"), "{quest}");
         assert!(quest.contains("- name: yaw\n"), "{quest}");
+        assert!(quest.contains("id: test-map\n"), "{quest}");
+        assert!(quest.contains("row_type: map\n"), "{quest}");
+        assert!(!quest.contains("ext.maps"), "{quest}");
+        assert!(!quest.contains("row_type: map-resource"), "{quest}");
         assert!(quest.contains("opcode: PredicateIsAvatar\n"), "{quest}");
         assert!(
             !quest.contains("name: toLog"),

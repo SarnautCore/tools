@@ -699,7 +699,19 @@ pub struct PlacementDocument {
     pub id: String,
     pub zone: String,
     #[serde(default)]
+    pub map: String,
+    #[serde(default)]
+    pub map_resource: String,
+    #[serde(default)]
     pub placements: Vec<SourcePlacement>,
+    #[serde(default)]
+    pub locators: Vec<SourceMapLocator>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SourceMapLocator {
+    pub script_id: String,
+    pub position: Position,
 }
 
 #[derive(Debug, Deserialize)]
