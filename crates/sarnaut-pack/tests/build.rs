@@ -72,7 +72,7 @@ fn recursive_script_rows_round_trip_byte_identically() {
     );
     assert_eq!(
         decoded.counters[0].objective_id,
-        "quest.harbour-watch.first.objective.0000000000000000000000000000000000000000000000000000000000000000"
+        "quest.harbour-watch.first.objective.1111111111111111111111111111111111111111111111111111111111111111"
     );
 
     let deferred = &decoded.start_impacts[0];
@@ -145,7 +145,7 @@ quest: quest.harbour-watch.first
 counters:
   - count_id: questcount.harbour-watch.first.count-id-1
     objective: 0
-    objective_id: quest.harbour-watch.first.objective.0000000000000000000000000000000000000000000000000000000000000000
+    objective_id: quest.harbour-watch.first.objective.1111111111111111111111111111111111111111111111111111111111111111
 start_impacts:
   - key: script.harbour-watch.first/startImpacts[0]
     family: impact
@@ -248,6 +248,32 @@ root:
 "#,
     )
     .expect("write script trigger");
+}
+
+#[test]
+fn counter_objective_id_must_match_the_indexed_quest_objective() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    write_script_fixture(&source);
+
+    let script = source.join("classic/zones/harbour-watch/scripts/quests/first.yaml");
+    let text = fs::read_to_string(&script).expect("read quest script");
+    fs::write(
+        &script,
+        text.replace(
+            "quest.harbour-watch.first.objective.1111111111111111111111111111111111111111111111111111111111111111",
+            "quest.harbour-watch.first.objective.0000000000000000000000000000000000000000000000000000000000000000",
+        ),
+    )
+    .expect("write mismatched objective id");
+
+    let error = compile::compile(&common::options(source))
+        .expect_err("build should reject a counter bound to the wrong objective id");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("objective 0") && message.contains("objective id"),
+        "error does not identify the mismatched objective binding: {message}"
+    );
 }
 
 #[test]
