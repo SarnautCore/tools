@@ -34,6 +34,13 @@ pub fn verify(pack: &Path) -> Result<VerifyReport> {
         document.schema_version,
         manifest::SCHEMA_VERSION
     );
+    let expected_bag_layout_catalog = crate::compile::product_bag_layout_catalog_blake3();
+    ensure!(
+        document.contracts.bag_layout_catalog_blake3 == expected_bag_layout_catalog,
+        "bag-layout catalog contract mismatch: manifest records {}, verifier requires {}",
+        document.contracts.bag_layout_catalog_blake3,
+        expected_bag_layout_catalog
+    );
 
     let mut listed = BTreeSet::new();
     let mut digest_input = Vec::with_capacity(document.tables.len());

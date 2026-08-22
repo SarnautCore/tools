@@ -335,7 +335,7 @@ fn manifest_records_every_table_and_its_digest() {
     )
     .expect("parse manifest");
 
-    assert_eq!(document.schema_version, 1);
+    assert_eq!(document.schema_version, 2);
     assert_eq!(document.zone, common::ZONE);
     assert_eq!(document.pack_id, report.pack_id());
     assert!(!document.keep_extra);

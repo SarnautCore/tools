@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const FILE_NAME: &str = "manifest.json";
 /// Format version of the pack itself. A reader rejects any other value.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 pub const BUILDER_NAME: &str = "sarnaut-pack";
 /// `source.commit` for a build with no identified source revision.
 pub const UNKNOWN_COMMIT: &str = "0000000000000000000000000000000000000000";
@@ -20,7 +20,15 @@ pub struct Manifest {
     pub builder: Builder,
     pub source: Source,
     pub keep_extra: bool,
+    pub contracts: Contracts,
     pub tables: Vec<TableEntry>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Contracts {
+    /// BLAKE3-256 of the canonical product bag-layout catalog. Readers recompute
+    /// this value from their own catalog and reject a compiler/runtime drift.
+    pub bag_layout_catalog_blake3: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

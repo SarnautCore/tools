@@ -315,6 +315,9 @@ pub fn compile(options: &BuildOptions) -> Result<CompiledPack> {
             overlays: tree.layers.iter().map(|layer| layer.id.clone()).collect(),
         },
         keep_extra: options.keep_extra,
+        contracts: manifest::Contracts {
+            bag_layout_catalog_blake3: product_bag_layout_catalog_blake3(),
+        },
         tables: entries,
     };
 
@@ -1942,6 +1945,26 @@ const PRODUCT_BAG_LAYOUTS: &[(&str, u32, &[u32])] = &[
     ("bag.layout.60", 60, &[30, 30]),
 ];
 
+pub(crate) fn product_bag_layout_catalog_blake3() -> String {
+    let mut hasher = blake3::Hasher::new();
+    let mut layouts = PRODUCT_BAG_LAYOUTS.to_vec();
+    layouts.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    for (id, capacity, partitions) in layouts {
+        hasher.update(id.as_bytes());
+        hasher.update(b"|");
+        hasher.update(capacity.to_string().as_bytes());
+        hasher.update(b"|");
+        for (index, partition) in partitions.iter().enumerate() {
+            if index > 0 {
+                hasher.update(b",");
+            }
+            hasher.update(partition.to_string().as_bytes());
+        }
+        hasher.update(b"\n");
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
 fn compiled_bag_layout(document: &source::ItemDocument) -> Result<(String, u32, Vec<u32>)> {
     let has_layout = document.bag_layout_id.is_some();
     let has_partitions = !document.bag_partition_sizes.is_empty();
@@ -2319,4 +2342,17 @@ fn packed_ref(git_dir: &Path, reference: &str) -> Option<String> {
         let (hash, name) = line.split_once(' ')?;
         (name == reference).then(|| hash.to_string())
     })
+}
+
+#[cfg(test)]
+mod bag_layout_contract_tests {
+    use super::product_bag_layout_catalog_blake3;
+
+    #[test]
+    fn product_catalog_digest_is_pinned_for_runtime_conformance() {
+        assert_eq!(
+            product_bag_layout_catalog_blake3(),
+            "55eb9f06f9eaadae54f7bbb984ffe341ba6272cb21eb4a87d8bbb550d4497ebc"
+        );
+    }
 }

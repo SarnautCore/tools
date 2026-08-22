@@ -4,6 +4,7 @@ mod common;
 
 use std::fs;
 
+use sarnaut_pack::manifest::Manifest;
 use sarnaut_pack::{compile, verify};
 
 #[test]
@@ -50,7 +51,7 @@ fn an_unsupported_schema_version_is_rejected() {
     let text = fs::read_to_string(&path).expect("read manifest");
     fs::write(
         &path,
-        text.replace("\"schema_version\": 1", "\"schema_version\": 2"),
+        text.replace("\"schema_version\": 2", "\"schema_version\": 3"),
     )
     .expect("rewrite manifest");
 
@@ -92,5 +93,31 @@ fn a_rewritten_pack_id_is_rejected() {
     assert!(
         format!("{error:#}").contains("pack_id mismatch"),
         "error does not name the pack_id mismatch: {error:#}"
+    );
+}
+
+#[test]
+fn a_foreign_bag_layout_catalog_is_rejected() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    let out = workspace.path().join("pack");
+    compile::build(&common::options(source), &out).expect("build");
+
+    let path = out.join("manifest.json");
+    let text = fs::read_to_string(&path).expect("read manifest");
+    let document: Manifest = serde_json::from_str(&text).expect("decode manifest");
+    fs::write(
+        &path,
+        text.replace(
+            &document.contracts.bag_layout_catalog_blake3,
+            &"0".repeat(64),
+        ),
+    )
+    .expect("rewrite manifest");
+
+    let error = verify::verify(&out).expect_err("verify should reject a foreign catalog");
+    assert!(
+        format!("{error:#}").contains("bag-layout catalog contract mismatch"),
+        "error does not name the contract mismatch: {error:#}"
     );
 }
