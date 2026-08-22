@@ -453,6 +453,14 @@ pub struct ItemDocument {
     /// Resolved offline from the ruleset's CursedItems.canBeCursed predicate.
     #[serde(default)]
     pub curse_eligible: bool,
+    /// Extracted capacity is retained for non-bag item families too, so it is
+    /// independent of the curated product bag contract below.
+    #[serde(default)]
+    pub capacity: Option<u32>,
+    #[serde(default)]
+    pub bag_layout_id: Option<String>,
+    #[serde(default)]
+    pub bag_partition_sizes: Vec<u32>,
     #[serde(default)]
     pub vendor_price: Option<VendorPriceDocument>,
     #[serde(default)]

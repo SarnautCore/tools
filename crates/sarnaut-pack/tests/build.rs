@@ -933,6 +933,88 @@ fn loot_documents_compile_into_the_item_and_loot_tables() {
 }
 
 #[test]
+fn product_bag_layout_is_deterministic_and_strict() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    common::write_loot(&source);
+    common::write_chargen(&source);
+    let chargen = source.join("classic/chargen/league-warrior.yaml");
+    let chargen_document = fs::read_to_string(&chargen).expect("read chargen");
+    fs::write(
+        &chargen,
+        chargen_document.replace(
+            "  - item_id: item.consumable.harbour-tonic\n    quantity: 3\n    slot: bag\n",
+            "  - item_id: item.consumable.harbour-tonic\n    quantity: 3\n    slot: bag\n  - item_id: item.bags.kania-newbie-bag\n    quantity: 1\n    slot: bag\n",
+        ),
+    )
+    .expect("add reachable bag to chargen");
+    let bag = source.join("classic/items/kania-bag.yaml");
+    fs::write(
+        &bag,
+        r#"schema_version: 1
+id: item.bags.kania-newbie-bag
+category: bags
+source_type: demo.ItemResource
+stack_limit: 1
+curse_eligible: true
+capacity: 18
+bag_layout_id: bag.layout.18
+bag_partition_sizes: [12, 6]
+"#,
+    )
+    .expect("write bag item");
+
+    let first = workspace.path().join("first");
+    let second = workspace.path().join("second");
+    compile::build(&common::options(source.clone()), &first).expect("first bag build");
+    compile::build(&common::options(source.clone()), &second).expect("second bag build");
+    assert_eq!(
+        fs::read(first.join("tables/items.sptbl")).expect("first item table"),
+        fs::read(second.join("tables/items.sptbl")).expect("second item table"),
+        "bag item table is not deterministic"
+    );
+
+    let items: Vec<proto::Item> = decode(&first, "items");
+    let compiled = items
+        .iter()
+        .find(|item| item.id == "item.bags.kania-newbie-bag")
+        .expect("compiled bag");
+    assert!(compiled.curse_eligible, "field 10 was not preserved");
+    assert_eq!(compiled.bag_layout_id, "bag.layout.18");
+    assert_eq!(compiled.bag_capacity, 18);
+    assert_eq!(compiled.bag_partition_sizes, [12, 6]);
+
+    let document = fs::read_to_string(&bag).expect("read bag item");
+    fs::write(&bag, document.replace("[12, 6]", "[6, 12]")).expect("write bad partitions");
+    let error = compile::build(&common::options(source), &workspace.path().join("bad"))
+        .expect_err("mismatched bag partitions compiled");
+    assert!(
+        format!("{error:#}").contains("want 18 and [12, 6]"),
+        "unexpected mismatch error: {error:#}"
+    );
+}
+
+#[test]
+fn capacity_without_product_bag_metadata_remains_legal() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    common::write_loot(&source);
+    let tonic = source.join("classic/items/tonic.yaml");
+    let document = fs::read_to_string(&tonic).expect("read tonic");
+    fs::write(&tonic, format!("{document}capacity: 7\n")).expect("write generic capacity");
+    let out = workspace.path().join("pack");
+    compile::build(&common::options(source), &out).expect("capacity-only item build");
+    let items: Vec<proto::Item> = decode(&out, "items");
+    let tonic = items
+        .iter()
+        .find(|item| item.id == "item.consumable.harbour-tonic")
+        .expect("tonic row");
+    assert!(tonic.bag_layout_id.is_empty());
+    assert_eq!(tonic.bag_capacity, 0);
+    assert!(tonic.bag_partition_sizes.is_empty());
+}
+
+#[test]
 fn a_loot_tree_whose_chances_do_not_pair_with_its_entries_is_refused() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));

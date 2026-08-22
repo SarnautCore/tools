@@ -440,6 +440,11 @@ message Item {
   string description_key = 9;
   // Resolved offline from the ruleset's CursedItems.canBeCursed predicate.
   bool curse_eligible = 10;
+  // Product-native equipped-bag layout. Offline compilation admits only the
+  // closed catalogue shared with the runtime inventory authority.
+  string bag_layout_id = 11;
+  uint32 bag_capacity = 12;
+  repeated uint32 bag_partition_sizes = 13;
   // Untyped passthrough; see Zone.extra.
   map<string, string> extra = 15;
 }

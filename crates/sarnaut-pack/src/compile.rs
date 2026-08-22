@@ -1900,6 +1900,7 @@ fn item_rows(tree: &SourceTree, locales: &LocaleIndex, keep_extra: bool) -> Resu
             );
         }
         let price = document.vendor_price.unwrap_or_default();
+        let (bag_layout_id, bag_capacity, bag_partition_sizes) = compiled_bag_layout(document)?;
         let message = proto::Item {
             id: document.id.clone(),
             name_key: key(locales, document.loc_ref.name.as_deref(), &document.source),
@@ -1918,11 +1919,75 @@ fn item_rows(tree: &SourceTree, locales: &LocaleIndex, keep_extra: bool) -> Resu
             vendor_sell: price.sell,
             vendor_buy: price.buy,
             curse_eligible: document.curse_eligible,
+            bag_layout_id,
+            bag_capacity,
+            bag_partition_sizes,
             extra: extra_map(&document.extra, keep_extra)?,
         };
         insert_unique(&mut seen, &document.id, message, "item")?;
     }
     Ok(encode_rows(seen))
+}
+
+const PRODUCT_BAG_LAYOUTS: &[(&str, u32, &[u32])] = &[
+    ("bag.layout.12", 12, &[12]),
+    ("bag.layout.16", 16, &[16]),
+    ("bag.layout.18", 18, &[12, 6]),
+    ("bag.layout.24", 24, &[16, 8]),
+    ("bag.layout.30", 30, &[30]),
+    ("bag.layout.36", 36, &[8, 8, 8, 6, 6]),
+    ("bag.layout.42", 42, &[30, 12]),
+    ("bag.layout.48", 48, &[12, 12, 12, 12]),
+    ("bag.layout.54", 54, &[30, 12, 12]),
+    ("bag.layout.60", 60, &[30, 30]),
+];
+
+fn compiled_bag_layout(document: &source::ItemDocument) -> Result<(String, u32, Vec<u32>)> {
+    let has_layout = document.bag_layout_id.is_some();
+    let has_partitions = !document.bag_partition_sizes.is_empty();
+    if !has_layout && !has_partitions {
+        return Ok((String::new(), 0, Vec::new()));
+    }
+    if !has_layout || !has_partitions || document.capacity.is_none() {
+        bail!(
+            "item {} has partial product bag metadata; layout id, capacity and partitions must be authored together",
+            document.id
+        );
+    }
+    if document.category.as_deref() != Some("bags") {
+        bail!(
+            "item {} has product bag metadata in category {:?}, want bags",
+            document.id,
+            document.category
+        );
+    }
+    let layout_id = document.bag_layout_id.as_deref().unwrap_or_default();
+    let capacity = document.capacity.unwrap_or_default();
+    let Some((_, expected_capacity, expected_partitions)) = PRODUCT_BAG_LAYOUTS
+        .iter()
+        .find(|(candidate, _, _)| *candidate == layout_id)
+    else {
+        bail!(
+            "item {} names unknown product bag layout {layout_id:?}",
+            document.id
+        );
+    };
+    if capacity != *expected_capacity || document.bag_partition_sizes != *expected_partitions {
+        bail!(
+            "item {} layout {} has capacity {} and partitions {:?}, want {} and {:?}",
+            document.id,
+            layout_id,
+            capacity,
+            document.bag_partition_sizes,
+            expected_capacity,
+            expected_partitions
+        );
+    }
+    Ok((
+        layout_id.to_owned(),
+        capacity,
+        document.bag_partition_sizes.clone(),
+    ))
 }
 
 /// Compiles the loot trees, enforcing every structural rule
