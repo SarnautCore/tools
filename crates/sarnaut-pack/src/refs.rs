@@ -448,10 +448,19 @@ pub fn check(tree: &SourceTree, universe: &Universe, locales: &LocaleIndex) -> R
         pass.locale(&document.id, &document.loc_ref, &document.source, locales);
     }
 
-    let quest_objectives: BTreeMap<&str, usize> = tree
+    let quest_objectives: BTreeMap<&str, Vec<&str>> = tree
         .quests
         .iter()
-        .map(|quest| (quest.id.as_str(), quest.objectives.len()))
+        .map(|quest| {
+            (
+                quest.id.as_str(),
+                quest
+                    .objectives
+                    .iter()
+                    .map(|objective| objective.objective_id.as_str())
+                    .collect(),
+            )
+        })
         .collect();
     for document in &tree.quest_scripts {
         pass.one("quest script -> zone", &document.id, &document.zone, |u| {
@@ -463,17 +472,31 @@ pub fn check(tree: &SourceTree, universe: &Universe, locales: &LocaleIndex) -> R
             &document.quest,
             |u| &u.quests,
         );
-        if let Some(&objectives) = quest_objectives.get(document.quest.as_str()) {
+        if let Some(objectives) = quest_objectives.get(document.quest.as_str()) {
             for counter in &document.counters {
-                if counter.objective as usize >= objectives {
-                    pass.report.dangling.push(DanglingRef {
+                let objective_index = counter.objective as usize;
+                match objectives.get(objective_index) {
+                    None => pass.report.dangling.push(DanglingRef {
                         class: "quest script -> objective",
                         referencer: document.id.clone(),
                         target: format!(
-                            "{} objective {} (the quest declares {objectives})",
-                            document.quest, counter.objective
+                            "{} objective {} (the quest declares {})",
+                            document.quest,
+                            counter.objective,
+                            objectives.len()
                         ),
-                    });
+                    }),
+                    Some(expected) if counter.objective_id != *expected => {
+                        pass.report.dangling.push(DanglingRef {
+                            class: "quest script -> objective id",
+                            referencer: document.id.clone(),
+                            target: format!(
+                                "{} objective {} id {} (the binding declares {})",
+                                document.quest, counter.objective, expected, counter.objective_id
+                            ),
+                        });
+                    }
+                    Some(_) => {}
                 }
             }
         }
