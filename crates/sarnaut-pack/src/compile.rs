@@ -1024,11 +1024,27 @@ fn reward_items(items: &[source::QuestRewardItemDocument]) -> Vec<proto::QuestRe
 fn quest_script_rows(tree: &SourceTree) -> Result<Vec<Row>> {
     let mut seen: BTreeMap<String, proto::QuestScript> = BTreeMap::new();
     for document in &tree.quest_scripts {
+        reject_source_identity(
+            &document.id,
+            format_args!("quest script id {:?}", document.id),
+        )?;
+        reject_source_identity(
+            &document.quest,
+            format_args!("quest script {} quest id", document.id),
+        )?;
         let mut check = ScriptRowCheck::new(&document.id);
         let mut counters = Vec::with_capacity(document.counters.len());
         let mut counter_ids: BTreeSet<&str> = BTreeSet::new();
         let mut objective_ids: BTreeSet<&str> = BTreeSet::new();
         for counter in &document.counters {
+            reject_source_identity(
+                &counter.count_id,
+                format_args!("quest script {} counter id", document.id),
+            )?;
+            reject_source_identity(
+                &counter.objective_id,
+                format_args!("quest script {} objective id", document.id),
+            )?;
             if counter.count_id.is_empty() {
                 bail!("quest script {}: a counter names no count_id", document.id);
             }
@@ -1093,6 +1109,10 @@ fn quest_script_rows(tree: &SourceTree) -> Result<Vec<Row>> {
 fn script_trigger_rows(tree: &SourceTree) -> Result<Vec<Row>> {
     let mut seen: BTreeMap<String, proto::ScriptTrigger> = BTreeMap::new();
     for document in &tree.script_triggers {
+        reject_source_identity(
+            &document.id,
+            format_args!("script trigger id {:?}", document.id),
+        )?;
         let mut check = ScriptRowCheck::new(&document.id);
         let message = proto::ScriptTrigger {
             id: document.id.clone(),
@@ -1151,6 +1171,16 @@ fn script_node(
             document.opcode
         );
     }
+    for (kind, value) in [
+        ("node key", document.key.as_str()),
+        ("family", document.family.as_str()),
+        ("opcode", document.opcode.as_str()),
+    ] {
+        reject_source_identity(
+            value,
+            format_args!("script row {} node {} {kind}", check.row_id, document.key),
+        )?;
+    }
     if !check.node_keys.insert(document.key.clone()) {
         bail!(
             "script row {}: node key {} appears twice",
@@ -1186,6 +1216,13 @@ fn script_node(
                 document.key
             );
         }
+        reject_source_identity(
+            &field.name,
+            format_args!(
+                "script row {} node {} field {index} name",
+                check.row_id, document.key
+            ),
+        )?;
         if let Some(previous) = document.fields.get(index.wrapping_sub(1))
             && index > 0
             && previous.name.as_bytes() >= field.name.as_bytes()
@@ -1250,6 +1287,25 @@ fn validate_implemented_opcode(node: &source::ScriptNodeDocument, row_id: &str) 
     let is_list = |value: &ScriptValueDocument| value.list.is_some();
 
     match node.opcode.as_str() {
+        "EffectTrigger" => {
+            if let Ok(event_classes) = field("eventClasses") {
+                let Some(entries) = event_classes.list.as_deref() else {
+                    return Err(fail_shape("eventClasses as a canonical event class list"));
+                };
+                if entries.is_empty()
+                    || entries.iter().any(|entry| {
+                        entry
+                            .text
+                            .as_deref()
+                            .is_none_or(|value| !is_canonical_event_class(value))
+                    })
+                {
+                    return Err(fail_shape(
+                        "eventClasses as a nonempty canonical event class list",
+                    ));
+                }
+            }
+        }
         "DestinationLocator" => {
             destination_locator_identity(node, row_id)?;
             if !is_integer(field("yaw")?) {
@@ -1309,6 +1365,16 @@ fn validate_implemented_opcode(node: &source::ScriptNodeDocument, row_id: &str) 
         _ => {}
     }
     Ok(())
+}
+
+fn is_canonical_event_class(value: &str) -> bool {
+    !value.is_empty()
+        && value.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
 }
 
 fn destination_locator_identity<'a>(
@@ -1428,6 +1494,10 @@ fn script_value(
     } else if let Some(boolean) = document.boolean {
         Value::Boolean(boolean)
     } else if let Some(text) = &document.text {
+        reject_source_identity(
+            text,
+            format_args!("script row {} node {node_key} text", check.row_id),
+        )?;
         Value::Text(text.clone())
     } else if let Some(reference) = &document.reference {
         if reference.id.is_empty() {
@@ -1435,6 +1505,19 @@ fn script_value(
                 "script row {}: a reference under node {node_key} names no id",
                 check.row_id
             );
+        }
+        reject_source_identity(
+            &reference.id,
+            format_args!("script row {} node {node_key} reference id", check.row_id),
+        )?;
+        if let Some(row_type) = &reference.row_type {
+            reject_source_identity(
+                row_type,
+                format_args!(
+                    "script row {} node {node_key} reference row type",
+                    check.row_id
+                ),
+            )?;
         }
         Value::Reference(proto::ContentRef {
             id: reference.id.clone(),
@@ -1455,6 +1538,51 @@ fn script_value(
         unreachable!("exactly one member was counted above")
     };
     Ok(proto::ScriptValue { value: Some(value) })
+}
+
+fn reject_source_identity(value: &str, context: impl std::fmt::Display) -> Result<()> {
+    const FORBIDDEN: &[&str] = &[
+        "gameMechanics",
+        "mapLoader",
+        "xpointer",
+        ".xdb",
+        "World/",
+        "Maps/",
+        "Mechanics/",
+        "Characters/",
+        "Creatures/",
+        "Items/",
+        "World\\",
+        "Maps\\",
+        "Mechanics\\",
+        "Characters\\",
+        "Creatures\\",
+        "Items\\",
+    ];
+    if let Some(fragment) = FORBIDDEN.iter().find(|fragment| value.contains(**fragment)) {
+        bail!("{context} carries source identity fragment {fragment:?}");
+    }
+    if let Some(marker) = parenthesized_source_marker(value) {
+        bail!("{context} carries source identity marker ({marker})");
+    }
+    Ok(())
+}
+
+fn parenthesized_source_marker(value: &str) -> Option<&str> {
+    for (open, _) in value.match_indices('(') {
+        let after_open = &value[open + 1..];
+        let Some(close) = after_open.find(')') else {
+            continue;
+        };
+        let marker = &after_open[..close];
+        if !marker.is_empty()
+            && marker.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            && marker.bytes().any(|byte| byte.is_ascii_uppercase())
+        {
+            return Some(marker);
+        }
+    }
+    None
 }
 
 /// Reads a boolean out of the untyped passthrough.

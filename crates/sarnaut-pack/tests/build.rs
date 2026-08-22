@@ -277,6 +277,53 @@ fn counter_objective_id_must_match_the_indexed_quest_objective() {
 }
 
 #[test]
+fn source_identity_text_must_not_reach_pack_tables() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let source = common::write_source(&workspace.path().join("src"));
+    write_script_fixture(&source);
+
+    let trigger =
+        source.join("classic/zones/harbour-watch/scripts/triggers/first.dress-trigger.yaml");
+    fs::write(
+        &trigger,
+        r#"schema_version: 1
+id: trigger.harbour-watch.first.dress-trigger
+zone: zone.harbour-watch
+root:
+  key: trigger.harbour-watch.first.dress-trigger
+  family: trigger
+  opcode: TriggerResource
+  tier: implemented
+  fields:
+    - name: effects
+      value:
+        list:
+          - node:
+              key: trigger.harbour-watch.first.dress-trigger/effects[0]
+              family: basic
+              opcode: EffectTrigger
+              tier: implemented
+              fields:
+                - name: eventClasses
+                  value:
+                    list:
+                      - text: future-path-event
+                - name: sourceLeak
+                  value:
+                    text: prefix(DressTrigger.(TriggerResource))
+"#,
+    )
+    .expect("write source-shaped event class");
+
+    let error = compile::compile(&common::options(source))
+        .expect_err("build should reject source identity in any serialized script field");
+    assert!(
+        error.to_string().contains("source identity"),
+        "error does not identify the source identity leak: {error:#}"
+    );
+}
+
+#[test]
 fn manifest_records_every_table_and_its_digest() {
     let workspace = tempfile::tempdir().expect("temp dir");
     let source = common::write_source(&workspace.path().join("src"));

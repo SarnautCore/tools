@@ -727,6 +727,24 @@ fn canonical_opcode_fields(
     mut fields: Vec<ScriptField>,
 ) -> Result<Vec<ScriptField>> {
     match opcode {
+        "EffectTrigger" => {
+            if let Some(event_classes) =
+                fields.iter_mut().find(|field| field.name == "eventClasses")
+            {
+                let Some(entries) = event_classes.value.list.as_mut() else {
+                    bail!("{key}: {opcode}.eventClasses is not a list");
+                };
+                if entries.is_empty() {
+                    bail!("{key}: {opcode}.eventClasses is empty");
+                }
+                for entry in entries {
+                    let Some(event_class) = entry.text.as_deref() else {
+                        bail!("{key}: {opcode}.eventClasses contains a non-text value");
+                    };
+                    entry.text = Some(canonical_event_class(event_class)?.to_owned());
+                }
+            }
+        }
         "DestinationLocator" => {
             let locator = required_field(&fields, "locator", key, opcode)?;
             let Some(locator) = locator.value.node.as_deref() else {
@@ -807,6 +825,15 @@ fn canonical_opcode_fields(
     }
     fields.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
     Ok(fields)
+}
+
+fn canonical_event_class(value: &str) -> Result<&str> {
+    match value {
+        "gameMechanics.world.mob.behaviour.aiEvents.GoneThroughPathEvent" => {
+            Ok("gone-through-path")
+        }
+        _ => bail!("no canonical event class maps source value {value:?}"),
+    }
 }
 
 /// Maps the one classic MapResource path shape to its source-free product id.
@@ -1200,7 +1227,11 @@ mod tests {
                 .join("World/Quests/TestZone/Quest_1/TriggerTarget.xdb"),
             r#"<gameMechanics.constructor.schemes.quest.trigger.TriggerResource>
   <effects>
-    <Item type="gameMechanics.elements.effects.EffectTrigger" />
+    <Item type="gameMechanics.elements.effects.EffectTrigger">
+      <eventClasses>
+        <Item>gameMechanics.world.mob.behaviour.aiEvents.GoneThroughPathEvent</Item>
+      </eventClasses>
+    </Item>
   </effects>
 </gameMechanics.constructor.schemes.quest.trigger.TriggerResource>"#,
         );
@@ -1256,6 +1287,21 @@ mod tests {
                 "unsuffixed TriggerResource {name} was not discovered by root element"
             );
         }
+
+        let target = fs::read_to_string(
+            output
+                .path()
+                .join("zones/test-zone/scripts/triggers/quest-1.trigger-target.yaml"),
+        )
+        .expect("read TriggerTarget");
+        assert!(
+            target.contains("- text: gone-through-path"),
+            "EffectTrigger event class was not canonicalized: {target}"
+        );
+        assert!(
+            !target.contains("gameMechanics.world.mob.behaviour.aiEvents.GoneThroughPathEvent"),
+            "a source event class leaked into the authored row: {target}"
+        );
 
         let dress = fs::read_to_string(
             output
